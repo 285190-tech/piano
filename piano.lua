@@ -206,16 +206,19 @@ local metaEvents = {
     [0x20] = makeForwarder("channelPrefix"),
     [0x2F] = makeForwarder("endOfTrack"),
     [0x51] = function(data, callback)
+        if #data < 3 then return end
         local b1, b2, b3 = string.byte(data, 1, 3)
         local rawTempo = bit32.bor(bit32.lshift(b1, 16), bit32.lshift(b2, 8), b3)
         callback("setTempo", rawTempo)
     end,
     [0x54] = makeForwarder("smpteOffset"),
     [0x58] = function(data, callback)
+        if #data < 4 then return end
         local numerator, denominator, metronome, dotted = string.byte(data, 1, 4)
         callback("timeSignature", numerator, bit32.lshift(1, denominator), metronome, dotted)
     end,
     [0x59] = function(data, callback)
+        if #data < 2 then return end
         local count, minor = string.byte(data, 1, 2)
         if count >= 128 then count = count - 256 end
         callback("keySignature", math.abs(count), count < 0 and "flat" or count > 0 and "sharp" or "C", minor == 0 and "major" or "minor")
@@ -408,16 +411,37 @@ end
 -- ==========================================
 local currentPlaybackSpeed = 1
 local playing = false
-local loading = false
 local playbackId = 0
+local stopHooks = {}
+
+local function registerStopHook(fn)
+    table.insert(stopHooks, fn)
+end
+
+local function releaseHeldKeys()
+    for keyEnum, held in pairs(keyHeld) do
+        if held then
+            keyPressId[keyEnum] = (keyPressId[keyEnum] or 0) + 1
+            keyHeld[keyEnum] = false
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
+            end)
+        end
+    end
+end
 
 local function stopPlayback()
     playbackId = playbackId + 1
     playing = false
-    loading = false
+    releaseHeldKeys()
+    for _, hook in ipairs(stopHooks) do
+        pcall(hook)
+    end
 end
 
-local function parseAndPlayMidi(midiString, myId)
+local function parseAndPlayMidi(midiString, myId, onStart)
+    if playbackId ~= myId then return false end
+
     local mthdIdx = midiString:find("MThd", 1, true)
     if not mthdIdx then
         warn("[Piano] Missing MThd header")
@@ -428,7 +452,6 @@ local function parseAndPlayMidi(midiString, myId)
         midiString = midiString:sub(mthdIdx)
     end
 
-    playing = true
     local stream = createStringStream(midiString)
 
     local division = 96
@@ -446,15 +469,18 @@ local function parseAndPlayMidi(midiString, myId)
             local ticks = ...
             currentTime = currentTime + ticks
         elseif name == "noteOn" then
-            local _, key, velocity = ...
-            if velocity > 0 then
+            local channel, key, velocity = ...
+            -- Channel 10 (1-indexed) is General MIDI percussion; skip drum hits on piano
+            if channel ~= 10 and velocity > 0 then
                 order = order + 1
                 table.insert(events, {time = currentTime, order = order, type = "note", key = key})
             end
         elseif name == "setTempo" then
             local rawTempo = ...
-            order = order + 1
-            table.insert(events, {time = currentTime, order = order, type = "tempo", tempo = rawTempo})
+            if type(rawTempo) == "number" and rawTempo > 0 then
+                order = order + 1
+                table.insert(events, {time = currentTime, order = order, type = "tempo", tempo = rawTempo})
+            end
         end
     end)
 
@@ -463,6 +489,8 @@ local function parseAndPlayMidi(midiString, myId)
         if playbackId == myId then playing = false end
         return false
     end
+
+    if playbackId ~= myId then return false end
 
     table.sort(events, function(a, b)
         if a.time == b.time then
@@ -478,9 +506,20 @@ local function parseAndPlayMidi(midiString, myId)
         if fpsRaw >= 128 then fpsRaw = fpsRaw - 256 end
         local fps = math.abs(fpsRaw)
         if fps == 29 then fps = 29.97 end
-        smpteTicksPerSec = fps * bit32.band(division, 0xFF)
+        local subframes = bit32.band(division, 0xFF)
+        if fps > 0 and subframes > 0 then
+            smpteTicksPerSec = fps * subframes
+        else
+            isSmpte = false
+            division = 96
+        end
     elseif division <= 0 then
         division = 96
+    end
+
+    playing = true
+    if onStart then
+        pcall(onStart)
     end
 
     local currentTempo = 500000
@@ -493,8 +532,9 @@ local function parseAndPlayMidi(midiString, myId)
 
         local deltaTicks = ev.time - lastTime
         if deltaTicks > 0 then
+            local speed = math.max(currentPlaybackSpeed, 0.05)
             local secondsPerTick = isSmpte and (1 / smpteTicksPerSec) or ((currentTempo / 1000000) / division)
-            local waitTime = (deltaTicks * secondsPerTick) / currentPlaybackSpeed
+            local waitTime = (deltaTicks * secondsPerTick) / speed
             nextEventClock = nextEventClock + waitTime
 
             local remaining = nextEventClock - os.clock()
@@ -515,7 +555,9 @@ local function parseAndPlayMidi(midiString, myId)
         end
 
         if ev.type == "tempo" then
-            currentTempo = ev.tempo
+            if ev.tempo > 0 then
+                currentTempo = ev.tempo
+            end
         elseif ev.type == "note" then
             local char = MidiToChar[ev.key]
             if char then
@@ -526,11 +568,13 @@ local function parseAndPlayMidi(midiString, myId)
 
     if playbackId == myId then
         playing = false
+        releaseHeldKeys()
     end
     return true
 end
 
 local function playTextSheet(sheet, bpm, myId)
+    if playbackId ~= myId then return end
     playing = true
     local i = 1
     local len = #sheet
@@ -601,6 +645,7 @@ local Window = Rayfield:CreateWindow({
 local QuickTab = Window:CreateTab("Quick Picks & URL", 4483362458)
 local LocalTab = Window:CreateTab("Local & Sheets", 4483362458)
 local NanoTab = Window:CreateTab("NanoMIDI API", 4483362458)
+local ExternalTab = Window:CreateTab("MuseScore & MidiShow", 4483362458)
 local GlobalTab = Window:CreateTab("🔍 Global Search", 4483362458)
 
 -- ==========================================
@@ -639,7 +684,8 @@ local function buildRepoUrlCandidates(rawUrl)
     return candidates
 end
 
-local function safeRequest(url, customHeaders)
+local function safeRequest(url, customHeaders, method, requestBody)
+    method = method or "GET"
     local headers = {
         ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         ["Accept"] = "*/*",
@@ -651,11 +697,15 @@ local function safeRequest(url, customHeaders)
     end
 
     if httpRequest then
-        local ok, res = pcall(httpRequest, {
+        local reqOpts = {
             Url = url,
-            Method = "GET",
+            Method = method,
             Headers = headers,
-        })
+        }
+        if requestBody ~= nil then
+            reqOpts.Body = requestBody
+        end
+        local ok, res = pcall(httpRequest, reqOpts)
         if not ok then
             return false, nil, tostring(res)
         end
@@ -665,6 +715,10 @@ local function safeRequest(url, customHeaders)
         return true, res, nil
     end
 
+    if method ~= "GET" then
+        return false, nil, "Executor does not support request() for " .. tostring(method)
+    end
+
     local getOk, body = pcall(game.HttpGet, game, url)
     if getOk and type(body) == "string" then
         return true, {StatusCode = 200, Body = body}, nil
@@ -672,7 +726,30 @@ local function safeRequest(url, customHeaders)
     return false, nil, "Executor does not support request() or HttpGet failed"
 end
 
-local function requestWithRetry(url, customHeaders, maxAttempts, retryDelay, shouldAbort)
+local function getResponseBody(res)
+    if type(res) ~= "table" then return nil end
+    if type(res.Body) == "string" then return res.Body end
+    if type(res.body) == "string" then return res.body end
+    return nil
+end
+
+local function getResponseHeader(res, name)
+    if type(res) ~= "table" then return nil end
+    local headers = res.Headers or res.headers
+    if type(headers) ~= "table" then return nil end
+    local target = name:lower()
+    for k, v in pairs(headers) do
+        if type(k) == "string" and k:lower() == target then
+            if type(v) == "table" then
+                return table.concat(v, "; ")
+            end
+            return tostring(v)
+        end
+    end
+    return nil
+end
+
+local function requestWithRetry(url, customHeaders, maxAttempts, retryDelay, shouldAbort, method, requestBody)
     maxAttempts = maxAttempts or 3
     retryDelay = retryDelay or 1.0
     local lastErr = "Unknown error"
@@ -683,11 +760,12 @@ local function requestWithRetry(url, customHeaders, maxAttempts, retryDelay, sho
             return false, nil, "Aborted", nil
         end
 
-        local ok, res, err = safeRequest(url, customHeaders)
+        local ok, res, err = safeRequest(url, customHeaders, method, requestBody)
         if ok and res then
             local status = res.StatusCode or res.status_code
+            local body = getResponseBody(res)
             lastStatus = status
-            if status == 200 and type(res.Body) == "string" then
+            if status == 200 and body then
                 return true, res, nil, status
             end
             lastErr = "HTTP " .. tostring(status)
@@ -708,10 +786,11 @@ local function fetchMidiBytesWithRetry(url, customHeaders, shouldAbort)
     if not ok then
         return false, nil, err, status
     end
-    if type(res.Body) ~= "string" or not res.Body:find("MThd", 1, true) then
+    local body = getResponseBody(res)
+    if not body or not body:find("MThd", 1, true) then
         return false, nil, "Response is not a MIDI file (missing MThd)", status
     end
-    return true, res.Body, nil, status
+    return true, body, nil, status
 end
 
 local function matchesQuery(label, query)
@@ -773,6 +852,203 @@ local function encodeUrlPath(str)
     end))
 end
 
+local function encodeQueryParam(str)
+    return (tostring(str or ""):gsub("([^%w%-%._~])", function(c)
+        return string.format("%%%02X", c:byte())
+    end))
+end
+
+local function decodeHtmlEntities(str)
+    local s = tostring(str or "")
+    s = s:gsub("&amp;", "&")
+    s = s:gsub("&quot;", '"')
+    s = s:gsub("&#0?39;", "'")
+    s = s:gsub("&#x27;", "'")
+    s = s:gsub("&apos;", "'")
+    s = s:gsub("&lt;", "<")
+    s = s:gsub("&gt;", ">")
+    s = s:gsub("&nbsp;", " ")
+    return s
+end
+
+local function stripHtmlTags(str)
+    return decodeHtmlEntities(tostring(str or ""):gsub("<[^>]->", " ")):gsub("%s+", " "):match("^%s*(.-)%s*$")
+end
+
+local MD5_K = {
+    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
+    0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+    0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
+    0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+    0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+    0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
+    0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
+    0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+    0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+}
+
+local MD5_S = {
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+}
+
+local function md5Hex(msg)
+    msg = tostring(msg or "")
+    local origBitLen = #msg * 8
+    msg = msg .. "\128"
+    local padLen = (56 - (#msg % 64)) % 64
+    if padLen > 0 then
+        msg = msg .. string.rep("\0", padLen)
+    end
+    local loLen = origBitLen % 4294967296
+    local hiLen = math.floor(origBitLen / 4294967296) % 4294967296
+    msg = msg .. string.pack("<I4I4", loLen, hiLen)
+
+    local a0, b0, c0, d0 = 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476
+    local band, bor, bxor, bnot = bit32.band, bit32.bor, bit32.bxor, bit32.bnot
+    local lshift, rshift = bit32.lshift, bit32.rshift
+
+    for offset = 1, #msg, 64 do
+        local M = {}
+        for j = 0, 15 do
+            local idx = offset + j * 4
+            M[j] = string.unpack("<I4", msg, idx)
+        end
+
+        local A, B, C, D = a0, b0, c0, d0
+        for i = 1, 64 do
+            local F, g
+            if i <= 16 then
+                F = bor(band(B, C), band(bnot(B), D))
+                g = i - 1
+            elseif i <= 32 then
+                F = bor(band(D, B), band(bnot(D), C))
+                g = (5 * (i - 1) + 1) % 16
+            elseif i <= 48 then
+                F = bxor(B, bxor(C, D))
+                g = (3 * (i - 1) + 5) % 16
+            else
+                F = bxor(C, bor(B, bnot(D)))
+                g = (7 * (i - 1)) % 16
+            end
+
+            local sum = (F + A + MD5_K[i] + M[g]) % 4294967296
+            local s = MD5_S[i]
+            local rot = bor(lshift(sum, s), rshift(sum, 32 - s))
+            A = D
+            D = C
+            C = B
+            B = (B + rot) % 4294967296
+        end
+
+        a0 = (a0 + A) % 4294967296
+        b0 = (b0 + B) % 4294967296
+        c0 = (c0 + C) % 4294967296
+        d0 = (d0 + D) % 4294967296
+    end
+
+    local raw = string.pack("<I4I4I4I4", a0, b0, c0, d0)
+    return (raw:gsub(".", function(c)
+        return string.format("%02x", c:byte())
+    end))
+end
+
+local function hexToStr(hexStr)
+    local clean = tostring(hexStr or ""):gsub("^W/", ""):gsub('"', ""):gsub("%s+", "")
+    local out = {}
+    for i = 1, #clean - 1, 2 do
+        local pair = clean:sub(i, i + 1)
+        if pair == "00" then break end
+        local b = tonumber(pair, 16)
+        if not b then break end
+        table.insert(out, string.char(b))
+    end
+    return table.concat(out)
+end
+
+local function decodeCustomBase64(encoded, alphabet)
+    if type(encoded) ~= "string" or type(alphabet) ~= "string" or #alphabet < 64 then
+        return ""
+    end
+    local clean = encoded:gsub("%s+", "")
+    local map = {}
+    for i = 1, 64 do
+        map[alphabet:sub(i, i)] = i - 1
+    end
+    local padChar = #alphabet >= 65 and alphabet:sub(65, 65) or "="
+    map[padChar] = 64
+
+    local bor, band, lshift, rshift = bit32.bor, bit32.band, bit32.lshift, bit32.rshift
+    local out = {}
+    for i = 1, #clean, 4 do
+        local c1 = map[clean:sub(i, i)]
+        local c2 = map[clean:sub(i + 1, i + 1)]
+        local c3 = map[clean:sub(i + 2, i + 2)] or 64
+        local c4 = map[clean:sub(i + 3, i + 3)] or 64
+        if c1 ~= nil and c2 ~= nil and c1 < 64 and c2 < 64 then
+            local b1 = bor(lshift(c1, 2), rshift(c2, 4))
+            table.insert(out, string.char(band(b1, 0xFF)))
+            if c3 < 64 then
+                local b2 = bor(lshift(band(c2, 0x0F), 4), rshift(c3, 2))
+                table.insert(out, string.char(band(b2, 0xFF)))
+                if c4 < 64 then
+                    local b3 = bor(lshift(band(c3, 0x03), 6), c4)
+                    table.insert(out, string.char(band(b3, 0xFF)))
+                end
+            end
+        end
+    end
+    return table.concat(out)
+end
+
+local function mergeCookieStrings(existing, setCookieHeader)
+    local jar = {}
+    local order = {}
+    local function addPair(name, val)
+        if name ~= "" and val ~= nil then
+            if jar[name] == nil then
+                table.insert(order, name)
+            end
+            jar[name] = val
+        end
+    end
+
+    if type(existing) == "string" and existing ~= "" then
+        for part in existing:gmatch("[^;]+") do
+            local k, v = part:match("^%s*([^=]+)=(.-)%s*$")
+            if k then addPair(k, v) end
+        end
+    end
+
+    if type(setCookieHeader) == "string" and setCookieHeader ~= "" then
+        for chunk in setCookieHeader:gmatch("[^,\r\n]+") do
+            local firstPart = chunk:match("^%s*([^;]+)")
+            if firstPart then
+                local k, v = firstPart:match("^([^=]+)=(.*)$")
+                local lowerK = k and k:lower() or ""
+                if k and lowerK ~= "expires" and lowerK ~= "path" and lowerK ~= "domain" and lowerK ~= "max-age" and lowerK ~= "samesite" then
+                    addPair(k, v)
+                end
+            end
+        end
+    end
+
+    local out = {}
+    for _, k in ipairs(order) do
+        table.insert(out, k .. "=" .. jar[k])
+    end
+    return table.concat(out, "; ")
+end
+
 local function formatArtists(artists)
     if type(artists) == "table" then
         return table.concat(artists, ", ")
@@ -782,13 +1058,504 @@ local function formatArtists(artists)
     return "Unknown"
 end
 
+local MuseState = {
+    map = {},
+    order = {},
+    query = "",
+    selected = nil,
+    autoPlayOnSelect = false,
+    suppressCallback = false,
+    searching = false,
+    searchGeneration = 0,
+    statusActive = false,
+    cachedSuffix = nil,
+}
+
+local MidiShowState = {
+    map = {},
+    order = {},
+    query = "",
+    selected = nil,
+    cookie = "",
+    autoPlayOnSelect = false,
+    suppressCallback = false,
+    searching = false,
+    searchGeneration = 0,
+    statusActive = false,
+}
+
+local runMuseSearch -- forward declaration
+local runMidiShowSearch -- forward declaration
+
+local function isMuseScoreUrl(url)
+    local clean = tostring(url or ""):lower()
+    return clean:find("musescore.com/", 1, true) ~= nil
+end
+
+local function isMidiShowUrl(url)
+    local clean = tostring(url or ""):lower()
+    return clean:find("midishow.com/", 1, true) ~= nil or clean:find("midishow.net/", 1, true) ~= nil
+end
+
+local function normalizeMuseScoreInput(input)
+    local clean = tostring(input or ""):match("^%s*(.-)%s*$")
+    if clean == "" then return nil end
+    if clean:match("^%d+$") then
+        return "https://musescore.com/scores/" .. clean
+    end
+    clean = clean:gsub("#.*$", "")
+    if not clean:match("^https?://") and clean:lower():find("musescore%.com") then
+        clean = "https://" .. clean
+    end
+    return clean
+end
+
+local function normalizeMidiShowInput(input)
+    local clean = tostring(input or ""):match("^%s*(.-)%s*$")
+    if clean == "" then return nil end
+    if clean:match("^%d+$") then
+        return "https://www.midishow.com/en/midi/" .. clean .. ".html"
+    end
+    clean = clean:gsub("#.*$", "")
+    if not clean:match("^https?://") and clean:lower():find("midishow%.com") then
+        clean = "https://" .. clean
+    end
+    local dlId = clean:match("midishow%.com/[^/]-/?midi/download%?id=(%d+)") or clean:match("midishow%.com/midi/download%?id=(%d+)")
+    if dlId then
+        return "https://www.midishow.com/en/midi/" .. dlId .. ".html"
+    end
+    return clean
+end
+
+local function fetchMuseScoreMidi(rawInput, shouldAbort)
+    local scoreUrl = normalizeMuseScoreInput(rawInput)
+    if not scoreUrl or not isMuseScoreUrl(scoreUrl) then
+        return false, nil, "Invalid MuseScore URL or ID"
+    end
+
+    local htmlHeaders = {
+        ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ["Accept-Language"] = "en-US,en;q=0.9",
+        ["Referer"] = "https://musescore.com/",
+    }
+
+    local ok, pageRes, err = requestWithRetry(scoreUrl, htmlHeaders, 2, 0.75, shouldAbort)
+    if not ok then
+        return false, nil, "MuseScore page error: " .. tostring(err)
+    end
+
+    local html = getResponseBody(pageRes) or ""
+    if html:find("This score is no longer available", 1, true) or html:find("Oops! This score is unavailable", 1, true) then
+        return false, nil, "MuseScore score is unavailable / removed"
+    end
+
+    local scoreId = scoreUrl:match("/scores/(%d+)")
+        or html:match("musescore://score/(%d+)")
+        or html:match('"score_id"%s*:%s*(%d+)')
+        or html:match('id=(%d+)&amp;type=')
+    if not scoreId then
+        return false, nil, "Could not find MuseScore score ID"
+    end
+
+    local suffixCandidates = {}
+    local seenSuffix = {}
+    local function addSuffix(s)
+        if s and s ~= "" and not seenSuffix[s] then
+            seenSuffix[s] = true
+            table.insert(suffixCandidates, s)
+        end
+    end
+
+    if MuseState.cachedSuffix then
+        addSuffix(MuseState.cachedSuffix)
+    end
+
+    local jsUrls = {}
+    local seenJs = {}
+    local function addJsUrl(u)
+        if not u or u == "" then return end
+        if u:sub(1, 2) == "//" then
+            u = "https:" .. u
+        elseif u:sub(1, 1) == "/" then
+            u = "https://musescore.com" .. u
+        end
+        if not seenJs[u] then
+            seenJs[u] = true
+            table.insert(jsUrls, u)
+        end
+    end
+
+    for jsUrl in html:gmatch('https://musescore%.com/static/public/build/musescore[^"\']*?/20[^"\']+%.js') do
+        addJsUrl(jsUrl)
+    end
+    for jsUrl in html:gmatch('"/static/public/build/musescore[^"\']*?/20[^"\']+%.js"') do
+        addJsUrl(jsUrl:sub(2, -2))
+    end
+    if #jsUrls == 0 then
+        for jsUrl in html:gmatch('https://musescore%.com/static/public/build/musescore[^"\']+%.js') do
+            addJsUrl(jsUrl)
+            if #jsUrls >= 4 then break end
+        end
+    end
+
+    for i = 1, math.min(#jsUrls, 3) do
+        if shouldAbort and shouldAbort() then
+            return false, nil, "Aborted"
+        end
+        local jsOk, jsRes = requestWithRetry(jsUrls[i], {["Referer"] = scoreUrl}, 1, 0.5, shouldAbort)
+        if jsOk then
+            local jsBody = getResponseBody(jsRes) or ""
+            local extracted = jsBody:match('"([^"]+)"%)%.substr%(0,4%)') or jsBody:match('"([^"]+)"%)%.slice%(0,4%)')
+            if extracted then
+                MuseState.cachedSuffix = extracted
+                addSuffix(extracted)
+                break
+            end
+        end
+    end
+
+    addSuffix("9654,4e")
+
+    local lastErr = "MuseScore API rejected MIDI request"
+    for _, suffix in ipairs(suffixCandidates) do
+        if shouldAbort and shouldAbort() then
+            return false, nil, "Aborted"
+        end
+        local auth = md5Hex(tostring(scoreId) .. "midi0" .. suffix):sub(1, 4)
+        local apiUrl = "https://musescore.com/api/jmuse?id=" .. tostring(scoreId) .. "&type=midi&index=0"
+        local apiOk, apiRes, apiErr, status = requestWithRetry(apiUrl, {
+            ["Accept"] = "application/json, */*",
+            ["Authorization"] = auth,
+            ["Origin"] = "https://musescore.com",
+            ["Referer"] = scoreUrl,
+        }, 2, 0.5, shouldAbort)
+
+        if apiOk then
+            local body = getResponseBody(apiRes) or ""
+            local decOk, data = pcall(HttpService.JSONDecode, HttpService, body)
+            local midiUrl = decOk and type(data) == "table" and ((type(data.info) == "table" and data.info.url) or data.url)
+            if type(midiUrl) == "string" and midiUrl ~= "" then
+                local mOk, midiBody, mErr = fetchMidiBytesWithRetry(midiUrl, {
+                    ["Referer"] = "https://musescore.com/",
+                }, shouldAbort)
+                if mOk and midiBody then
+                    return true, midiBody, nil
+                end
+                lastErr = "MuseScore MIDI download failed: " .. tostring(mErr)
+            else
+                lastErr = "MuseScore API returned no MIDI URL"
+            end
+        else
+            lastErr = "MuseScore API (" .. tostring(status or apiErr) .. ")"
+        end
+    end
+
+    return false, nil, lastErr .. " (score may require MuseScore PRO or have MIDI disabled)"
+end
+
+local function searchMuseScore(query)
+    local cleanQuery = tostring(query or ""):match("^%s*(.-)%s*$")
+    if cleanQuery == "" then
+        return false, nil, "Enter a search query"
+    end
+
+    local searchUrl = "https://musescore.com/sheetmusic?text=" .. encodeQueryParam(cleanQuery)
+    local ok, res, err = requestWithRetry(searchUrl, {
+        ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ["Accept-Language"] = "en-US,en;q=0.9",
+        ["Referer"] = "https://musescore.com/",
+    }, 2, 0.75)
+    if not ok then
+        return false, nil, "MuseScore search failed: " .. tostring(err)
+    end
+
+    local html = getResponseBody(res) or ""
+    local decodedHtml = decodeHtmlEntities(html)
+    local results = {}
+    local seenIds = {}
+
+    local function addResult(title, url)
+        if type(url) ~= "string" then return end
+        local cleanUrl = url:gsub("\\/", "/"):gsub("#.*$", ""):gsub("%?.*$", "")
+        if cleanUrl:sub(1, 1) == "/" then
+            cleanUrl = "https://musescore.com" .. cleanUrl
+        end
+        local scoreId = cleanUrl:match("/scores/(%d+)")
+        if not scoreId or seenIds[scoreId] then return end
+        seenIds[scoreId] = true
+        local cleanTitle = stripHtmlTags(title)
+        if cleanTitle == "" then
+            cleanTitle = "Score #" .. scoreId
+        end
+        if #cleanTitle > 90 then
+            cleanTitle = cleanTitle:sub(1, 87) .. "..."
+        end
+        table.insert(results, {
+            title = cleanTitle,
+            url = cleanUrl,
+            id = scoreId,
+        })
+    end
+
+    -- JSON / data-content embedded store entries (decoded from &quot;)
+    for title, url in decodedHtml:gmatch('"title"%s*:%s*"([^"]-)"[^}]-"url"%s*:%s*"(https?://musescore%.com/[^"]-/scores/%d+[^"]*)"') do
+        addResult(title, url)
+        if #results >= 50 then break end
+    end
+
+    if #results < 50 then
+        for url, title in decodedHtml:gmatch('"url"%s*:%s*"(https?://musescore%.com/[^"]-/scores/%d+[^"]*)"[^}]-"title"%s*:%s*"([^"]-)"') do
+            addResult(title, url)
+            if #results >= 50 then break end
+        end
+    end
+
+    if #results < 50 then
+        for attrs, inner in html:gmatch('<a%s+([^>]-href=["\'][^"\']-/scores/%d+[^"\']*["\'][^>]*)>(.-)</a>') do
+            local url = attrs:match('href=["\']([^"\']-/scores/%d+[^"\']*)["\']')
+            local imgAlt = inner:match('alt=["\']([^"\']+)["\']')
+            local title = attrs:match('aria%-label=["\']([^"\']+)["\']') or attrs:match('title=["\']([^"\']+)["\']') or imgAlt or inner
+            addResult(title, url)
+            if #results >= 50 then break end
+        end
+    end
+
+    return true, results, nil
+end
+
+local function fetchMidiShowMidi(rawInput, shouldAbort)
+    local pageUrl = normalizeMidiShowInput(rawInput)
+    if not pageUrl or not isMidiShowUrl(pageUrl) then
+        return false, nil, "Invalid MidiShow URL or ID"
+    end
+
+    local cookieHeader = MidiShowState.cookie ~= "" and MidiShowState.cookie or nil
+
+    -- Direct .mid file URL attempt if passed directly
+    if pageUrl:lower():match("%.mid$") or pageUrl:lower():match("%.mid%?") then
+        local directOk, directBody = fetchMidiBytesWithRetry(pageUrl, {
+            ["Referer"] = "https://www.midishow.com/",
+            ["Cookie"] = cookieHeader,
+        }, shouldAbort)
+        if directOk and directBody then
+            return true, directBody, nil
+        end
+        local directId = pageUrl:match("/(%d+)%.mid")
+        if directId then
+            pageUrl = "https://www.midishow.com/en/midi/" .. directId .. ".html"
+        end
+    end
+
+    local pageHeaders = {
+        ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ["Accept-Language"] = "en-US,en;q=0.9,zh-CN;q=0.8",
+        ["Referer"] = "https://www.midishow.com/",
+    }
+    if cookieHeader then
+        pageHeaders["Cookie"] = cookieHeader
+    end
+
+    local ok, pageRes, err, status = requestWithRetry(pageUrl, pageHeaders, 2, 0.75, shouldAbort)
+    if not ok then
+        if status == 403 then
+            return false, nil, "MidiShow returned HTTP 403 (Cloudflare/login required; paste your midishow.com Cookie)"
+        end
+        return false, nil, "MidiShow page error: " .. tostring(err)
+    end
+
+    local html = getResponseBody(pageRes) or ""
+    if html:find("cf-browser-verification", 1, true) or html:find("challenge-platform", 1, true) or html:find("Just a moment", 1, true) then
+        return false, nil, "MidiShow blocked by Cloudflare challenge (paste browser Cookie in MuseScore & MidiShow tab)"
+    end
+
+    local setCookie = getResponseHeader(pageRes, "set-cookie")
+    cookieHeader = mergeCookieStrings(cookieHeader, setCookie)
+
+    local csrfToken = html:match('<meta[^>]-name=["\']csrf%-token["\'][^>]-content=["\']([^"\']+)["\']')
+        or html:match('<meta[^>]-content=["\']([^"\']+)["\'][^>]-name=["\']csrf%-token["\']')
+    local midiId = html:match('data%-id=["\'](%d+)["\']')
+        or pageUrl:match("/(%d+)%.html")
+        or pageUrl:match("%-(%d+)/?$")
+        or pageUrl:match("[?&]id=(%d+)")
+    local dataMid = html:match('data%-mid=["\']([^"\']+)["\']')
+    if dataMid then
+        dataMid = decodeHtmlEntities(dataMid)
+    end
+
+    local lastErr = "Could not extract MidiShow MIDI data"
+
+    if midiId and csrfToken and dataMid then
+        local postUrl = "https://www.midishow.com/midi/new-file?id=" .. tostring(midiId)
+        local postHeaders = {
+            ["Accept"] = "*/*",
+            ["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8",
+            ["Origin"] = "https://www.midishow.com",
+            ["Referer"] = pageUrl,
+            ["X-Csrf-Token"] = csrfToken,
+            ["X-Requested-With"] = "XMLHttpRequest",
+        }
+        if cookieHeader ~= "" then
+            postHeaders["Cookie"] = cookieHeader
+        end
+
+        local postOk, postRes, postErr, postStatus = requestWithRetry(postUrl, postHeaders, 2, 0.5, shouldAbort, "POST", "id=" .. tostring(midiId))
+        if postOk then
+            local body1 = getResponseBody(postRes) or ""
+            if #body1 >= 57 then
+                local etag = getResponseHeader(postRes, "etag") or ""
+                local jsUrl = dataMid
+                    :gsub("^https?://www%.midishow%.com", "https://s.midishow.net")
+                    :gsub("^https?://midishow%.com", "https://s.midishow.net")
+                    :gsub("%.mid%?", ".js?")
+                    :gsub("%.mid$", ".js")
+
+                local jsOk, jsRes, jsErr = requestWithRetry(jsUrl, {
+                    ["Accept"] = "*/*",
+                    ["Referer"] = "https://www.midishow.com/",
+                }, 2, 0.5, shouldAbort)
+
+                if jsOk then
+                    local body2 = getResponseBody(jsRes) or ""
+                    local jsChunk = body2:match('^[^(]+%("([^"]*)"%)')
+                        or body2:match("^[^(]+%('([^']*)'%)")
+                        or (#body2 >= 7 and body2:sub(4, -4) or "")
+
+                    local chrSet = hexToStr(etag) .. body1:sub(57)
+                    if #chrSet >= 64 then
+                        local part1 = decodeCustomBase64(body1:sub(29, 56), chrSet)
+                        local part2 = decodeCustomBase64(jsChunk, chrSet)
+                        local part3 = decodeCustomBase64(body1:sub(1, 28), chrSet)
+                        local midiBytes = part1 .. part2 .. part3
+                        if midiBytes:find("MThd", 1, true) then
+                            return true, midiBytes, nil
+                        end
+                        lastErr = "MidiShow decoded bytes were not valid MIDI"
+                    else
+                        lastErr = "MidiShow charset/ETag missing"
+                    end
+                else
+                    lastErr = "MidiShow JS chunk error: " .. tostring(jsErr)
+                end
+            else
+                lastErr = "MidiShow new-file returned unexpected payload"
+            end
+        else
+            if postStatus == 403 then
+                lastErr = "MidiShow denied playback token (HTTP 403; login Cookie in MuseScore & MidiShow tab may be required)"
+            else
+                lastErr = "MidiShow new-file error: " .. tostring(postErr)
+            end
+        end
+    end
+
+    -- Fallback: try legacy direct /midi/file/<id>.mid endpoint
+    if midiId then
+        local legacyUrl = "https://www.midishow.com/midi/file/" .. tostring(midiId) .. ".mid"
+        local legOk, legBody = fetchMidiBytesWithRetry(legacyUrl, {
+            ["Referer"] = pageUrl,
+            ["Cookie"] = cookieHeader ~= "" and cookieHeader or nil,
+        }, shouldAbort)
+        if legOk and legBody then
+            return true, legBody, nil
+        end
+    end
+
+    return false, nil, lastErr
+end
+
+local function searchMidiShow(query)
+    local cleanQuery = tostring(query or ""):match("^%s*(.-)%s*$")
+    if cleanQuery == "" then
+        return false, nil, "Enter a search query"
+    end
+
+    local searchUrl = "https://www.midishow.com/en/search/result?q=" .. encodeQueryParam(cleanQuery)
+    local headers = {
+        ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ["Accept-Language"] = "en-US,en;q=0.9,zh-CN;q=0.8",
+        ["Referer"] = "https://www.midishow.com/en",
+    }
+    if MidiShowState.cookie ~= "" then
+        headers["Cookie"] = MidiShowState.cookie
+    end
+
+    local searchUrls = {
+        "https://www.midishow.com/en/search/result?q=" .. encodeQueryParam(cleanQuery),
+        "https://www.midishow.com/search/result?q=" .. encodeQueryParam(cleanQuery),
+    }
+
+    local results = {}
+    local seenIds = {}
+    local lastErr = "MidiShow search failed"
+
+    for _, searchUrl in ipairs(searchUrls) do
+        local ok, res, err, status = requestWithRetry(searchUrl, headers, 2, 0.75)
+        if not ok then
+            if status == 403 then
+                return false, nil, "MidiShow search blocked (HTTP 403 / Cloudflare; try setting Cookie)"
+            end
+            lastErr = "MidiShow search failed: " .. tostring(err)
+        else
+            local html = getResponseBody(res) or ""
+            if html:find("cf-browser-verification", 1, true) or html:find("challenge-platform", 1, true) or html:find("Just a moment", 1, true) then
+                return false, nil, "MidiShow blocked by Cloudflare challenge (set Cookie)"
+            end
+
+            for attrs, inner in html:gmatch('<a%s+([^>]-href=["\'][^"\']-/midi/[^"\']+["\'][^>]*)>(.-)</a>') do
+                local rawHref = attrs:match('href=["\']([^"\']+)["\']')
+                if rawHref then
+                    local cleanHref = rawHref:gsub("#.*$", ""):gsub("%?.*$", "")
+                    local id = cleanHref:match("/(%d+)%.html") or cleanHref:match("%-(%d+)/?$")
+                    if id and not seenIds[id] and not cleanHref:find("/midi/browse", 1, true) and not cleanHref:find("/midi/download", 1, true) then
+                        local heading = inner:match("<h[1-6][^>]*>(.-)</h[1-6]>") or inner:match("<strong[^>]*>(.-)</strong>")
+                        local rawTitle = heading or attrs:match('title=["\']([^"\']+)["\']') or inner
+                        local cleanTitle = stripHtmlTags(rawTitle)
+                        if cleanTitle ~= "" and not cleanTitle:lower():match("^download") then
+                            if #cleanTitle > 90 then
+                                cleanTitle = cleanTitle:sub(1, 87) .. "..."
+                            end
+                            seenIds[id] = true
+                            local fullUrl = cleanHref:match("^https?://") and cleanHref or ("https://www.midishow.com" .. (cleanHref:sub(1, 1) == "/" and "" or "/") .. cleanHref)
+                            table.insert(results, {
+                                title = cleanTitle,
+                                url = fullUrl,
+                                id = id,
+                            })
+                            if #results >= 50 then break end
+                        end
+                    end
+                end
+            end
+
+            if #results > 0 then
+                return true, results, nil
+            end
+        end
+    end
+
+    if #results == 0 and lastErr ~= "MidiShow search failed" then
+        return false, nil, lastErr
+    end
+    return true, results, nil
+end
+
+local function resolveAndFetchMidiUrl(rawUrl, shouldAbort)
+    local url = normalizeMidiUrl(rawUrl)
+    if isMuseScoreUrl(url) then
+        return fetchMuseScoreMidi(url, shouldAbort)
+    elseif isMidiShowUrl(url) then
+        return fetchMidiShowMidi(url, shouldAbort)
+    end
+    return fetchMidiBytesWithRetry(url, nil, shouldAbort)
+end
+
 local function downloadAndPlayUrl(rawUrl, sourceName, silent)
     local url = normalizeMidiUrl(rawUrl)
     if not url or not url:match("^https?://") then
         if not silent then
             Rayfield:Notify({
                 Title = "Invalid URL",
-                Content = "Please enter or select a valid http:// or https:// .mid URL.",
+                Content = "Please enter a valid http:// or https:// .mid, MuseScore, or MidiShow URL.",
                 Duration = 3,
             })
         end
@@ -796,16 +1563,14 @@ local function downloadAndPlayUrl(rawUrl, sourceName, silent)
     end
 
     stopPlayback()
-    loading = true
     local myId = playbackId
 
     task.spawn(function()
-        local ok, midiBody, err = fetchMidiBytesWithRetry(url, nil, function()
+        local ok, midiBody, err = resolveAndFetchMidiUrl(url, function()
             return playbackId ~= myId
         end)
 
         if playbackId ~= myId then return end
-        loading = false
 
         if not ok then
             warn("[" .. sourceName .. "] Load failed:", err, "| URL:", url)
@@ -819,7 +1584,14 @@ local function downloadAndPlayUrl(rawUrl, sourceName, silent)
             return
         end
 
-        parseAndPlayMidi(midiBody, myId)
+        local played = parseAndPlayMidi(midiBody, myId)
+        if not played and playbackId == myId and not silent then
+            Rayfield:Notify({
+                Title = "Invalid MIDI",
+                Content = "Downloaded file could not be parsed as MIDI.",
+                Duration = 4,
+            })
+        end
     end)
 end
 
@@ -828,6 +1600,7 @@ local QuickState = {
     map = {},
     order = {},
     filtered = {},
+    totalMatches = 0,
     query = "",
     selected = nil,
     repoUrl = QUICKPICKS_REPO_URL,
@@ -836,6 +1609,7 @@ local QuickState = {
     suppressCallback = false,
     verifying = false,
     fetchGeneration = 0,
+    statusActive = false,
 }
 
 local LocalState = {
@@ -866,9 +1640,12 @@ local NanoState = {
 local GlobalState = {
     resultsMap = {},
     resultsOrder = {},
+    totalMatches = 0,
     query = "",
     selected = nil,
     suppressCallback = false,
+    statusActive = false,
+    liveExternalSearch = true,
 }
 
 local refreshGlobalSearchResults -- forward declaration
@@ -881,9 +1658,25 @@ QuickTab:CreateSection("Quick Picks (Search & Auto-Sync)")
 local QuickStatusLabel = QuickTab:CreateLabel("Quick Picks: Loading...")
 local QuickPickDropdown -- forward declared
 
+local function updateQuickStatusLabel()
+    QuickState.statusActive = false
+    if QuickState.query ~= "" then
+        setLabelSafe(QuickStatusLabel, string.format("Quick Picks (%s): %d matches (%d total)", QuickState.sourceLabel, QuickState.totalMatches, #QuickState.order))
+    else
+        setLabelSafe(QuickStatusLabel, string.format("Quick Picks (%s): %d songs ready", QuickState.sourceLabel, #QuickState.order))
+    end
+end
+
+registerStopHook(function()
+    if QuickState.statusActive then
+        updateQuickStatusLabel()
+    end
+end)
+
 local function applyQuickPickFilter()
     local matches, totalMatches = filterSongList(QuickState.order, QuickState.query, MAX_DROPDOWN_ITEMS)
     QuickState.filtered = matches
+    QuickState.totalMatches = totalMatches
     QuickState.selected = setDropdownOptions(
         QuickPickDropdown,
         matches,
@@ -891,11 +1684,7 @@ local function applyQuickPickFilter()
         function(v) QuickState.suppressCallback = v end
     )
 
-    if QuickState.query ~= "" then
-        setLabelSafe(QuickStatusLabel, string.format("Quick Picks (%s): %d matches (%d total)", QuickState.sourceLabel, totalMatches, #QuickState.order))
-    else
-        setLabelSafe(QuickStatusLabel, string.format("Quick Picks (%s): %d songs ready", QuickState.sourceLabel, #QuickState.order))
-    end
+    updateQuickStatusLabel()
 end
 
 local function setQuickPickEntries(entries, sourceLabel)
@@ -904,9 +1693,12 @@ local function setQuickPickEntries(entries, sourceLabel)
     QuickState.sourceLabel = sourceLabel or "Built-in"
 
     for _, item in ipairs(entries) do
-        local label = tostring(item.name or "Untitled")
-        if QuickState.map[label] then
-            label = label .. " (" .. tostring(#QuickState.order + 1) .. ")"
+        local baseLabel = tostring(item.name or "Untitled")
+        local label = baseLabel
+        local suffix = 2
+        while QuickState.map[label] do
+            label = baseLabel .. " (" .. tostring(suffix) .. ")"
+            suffix = suffix + 1
         end
         QuickState.map[label] = normalizeMidiUrl(item.url)
         table.insert(QuickState.order, label)
@@ -920,7 +1712,7 @@ end
 
 local function parseQuickPickFile(body)
     local list = {}
-    local trimmed = body:match("^%s*(.-)%s*$")
+    local trimmed = body:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$")
 
     if trimmed:sub(1, 1) == "[" or trimmed:sub(1, 1) == "{" then
         local ok, data = pcall(HttpService.JSONDecode, HttpService, trimmed)
@@ -1023,29 +1815,33 @@ QuickTab:CreateButton({
         end
 
         stopPlayback()
-        loading = true
         local myId = playbackId
 
         task.spawn(function()
             for idx, entry in ipairs(candidates) do
                 if playbackId ~= myId then return end
+                QuickState.statusActive = true
                 setLabelSafe(QuickStatusLabel, string.format("Auto-trying (%d/%d): %s", idx, #candidates, entry.label))
                 local ok, midiBody = fetchMidiBytesWithRetry(entry.url, nil, function()
                     return playbackId ~= myId
                 end)
                 if playbackId ~= myId then return end
                 if ok and midiBody then
-                    loading = false
-                    setLabelSafe(QuickStatusLabel, "Playing: " .. entry.label)
-                    Rayfield:Notify({Title = "Loaded & Playing", Content = entry.label, Duration = 3})
-                    parseAndPlayMidi(midiBody, myId)
-                    return
+                    local played = parseAndPlayMidi(midiBody, myId, function()
+                        QuickState.statusActive = true
+                        setLabelSafe(QuickStatusLabel, "Playing: " .. entry.label)
+                        Rayfield:Notify({Title = "Loaded & Playing", Content = entry.label, Duration = 3})
+                    end)
+                    if playbackId ~= myId then return end
+                    if played then
+                        updateQuickStatusLabel()
+                        return
+                    end
                 end
             end
 
             if playbackId == myId then
-                loading = false
-                applyQuickPickFilter()
+                updateQuickStatusLabel()
                 Rayfield:Notify({Title = "Auto-Try Failed", Content = "None of the matching Quick Picks returned valid MIDI data.", Duration = 4})
             end
         end)
@@ -1094,8 +1890,9 @@ local function fetchFromRepoUrl(urlToFetch, silent)
                 local ok, res, err = safeRequest(fetchUrl)
                 if ok and res then
                     local status = res.StatusCode or res.status_code
-                    if status == 200 and type(res.Body) == "string" then
-                        local parsed = parseQuickPickFile(res.Body)
+                    local body = getResponseBody(res)
+                    if status == 200 and body then
+                        local parsed = parseQuickPickFile(body)
                         if #parsed > 0 then
                             if QuickState.fetchGeneration ~= myGen then return end
                             setQuickPickEntries(parsed, "GitHub Repo")
@@ -1168,7 +1965,15 @@ QuickTab:CreateButton({
         QuickState.verifying = true
 
         task.spawn(function()
-            local total = #QuickState.order
+            local snapshot = {}
+            for _, label in ipairs(QuickState.order) do
+                local url = QuickState.map[label]
+                if url then
+                    table.insert(snapshot, {label = label, url = url})
+                end
+            end
+
+            local total = #snapshot
             local passed = 0
             local failedCount = 0
             local index = 0
@@ -1187,20 +1992,18 @@ QuickTab:CreateButton({
                         local i = index
                         if i > total then break end
 
-                        local label = QuickState.order[i]
-                        local url = QuickState.map[label]
-                        if url then
-                            local ok, res, err = safeRequest(url)
-                            local status = ok and res and (res.StatusCode or res.status_code) or nil
-                            local isMidi = ok and res and status == 200 and type(res.Body) == "string" and res.Body:find("MThd", 1, true) ~= nil
+                        local item = snapshot[i]
+                        local ok, res, err = safeRequest(item.url)
+                        local status = ok and res and (res.StatusCode or res.status_code) or nil
+                        local body = getResponseBody(res)
+                        local isMidi = ok and res and status == 200 and body ~= nil and body:find("MThd", 1, true) ~= nil
 
-                            if isMidi then
-                                passed = passed + 1
-                            else
-                                failedCount = failedCount + 1
-                                local reason = not ok and tostring(err) or ("HTTP " .. tostring(status) .. " / not MIDI")
-                                warn(string.format("[Verify FAIL] %s | %s | %s", label, reason, url))
-                            end
+                        if isMidi then
+                            passed = passed + 1
+                        else
+                            failedCount = failedCount + 1
+                            local reason = not ok and tostring(err) or ("HTTP " .. tostring(status) .. " / not MIDI")
+                            warn(string.format("[Verify FAIL] %s | %s | %s", item.label, reason, item.url))
                         end
                         done = done + 1
                     end
@@ -1222,14 +2025,14 @@ QuickTab:CreateButton({
     end,
 })
 
-QuickTab:CreateSection("Direct .mid URL")
+QuickTab:CreateSection("Direct .mid / MuseScore / MidiShow URL")
 
 local customMidiUrl = ""
 
 QuickTab:CreateInput({
-    Name = "Direct .mid URL",
+    Name = "Direct .mid / Score URL",
     CurrentValue = "",
-    PlaceholderText = "https://raw.githubusercontent.com/.../song.mid",
+    PlaceholderText = "https://.../song.mid, musescore.com/.../scores/..., or midishow.com/...",
     RemoveTextAfterFocusLost = false,
     Flag = "CustomMidiUrl",
     Callback = function(Text)
@@ -1290,8 +2093,10 @@ local function scanLocalMidiFiles()
                 if not seen[path] then
                     seen[path] = true
                     local label = name
-                    if LocalState.files[label] then
-                        label = label .. " (" .. tostring(#LocalState.order + 1) .. ")"
+                    local suffix = 2
+                    while LocalState.files[label] do
+                        label = name .. " (" .. tostring(suffix) .. ")"
+                        suffix = suffix + 1
                     end
                     LocalState.files[label] = path
                     table.insert(LocalState.order, label)
@@ -1339,9 +2144,20 @@ local function playLocalSelection(label)
         return
     end
 
+    if not content:find("MThd", 1, true) then
+        warn("[Local MIDI] Not a valid MIDI file (missing MThd):", path)
+        Rayfield:Notify({Title = "Invalid MIDI File", Content = "Selected file is missing an MThd MIDI header.", Duration = 3})
+        return
+    end
+
     stopPlayback()
     local myId = playbackId
-    task.spawn(parseAndPlayMidi, content, myId)
+    task.spawn(function()
+        local played = parseAndPlayMidi(content, myId)
+        if not played and playbackId == myId then
+            Rayfield:Notify({Title = "MIDI Parse Error", Content = "Could not parse the selected local MIDI file.", Duration = 4})
+        end
+    end)
 end
 
 LocalTab:CreateInput({
@@ -1483,7 +2299,6 @@ local function playNanoSelection(label, silent)
     end
 
     stopPlayback()
-    loading = true
     local myId = playbackId
 
     task.spawn(function()
@@ -1493,10 +2308,12 @@ local function playNanoSelection(label, silent)
         end)
 
         if playbackId ~= myId then return end
-        loading = false
 
         if ok and midiBody then
-            parseAndPlayMidi(midiBody, myId)
+            local played = parseAndPlayMidi(midiBody, myId)
+            if not played and playbackId == myId and not silent then
+                Rayfield:Notify({Title = "NanoMIDI Invalid MIDI", Content = "Downloaded file could not be parsed as MIDI.", Duration = 4})
+            end
         else
             warn("[NanoMIDI] Download failed:", err)
             if not silent then
@@ -1528,8 +2345,16 @@ local function refreshNanoSongs(silent)
             return
         end
 
-        local decodeOk, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+        local body = getResponseBody(res)
+        local decodeOk, data = pcall(HttpService.JSONDecode, HttpService, body or "")
         if not decodeOk or type(data) ~= "table" then
+            NanoState.loadingList = false
+            setLabelSafe(NanoStatusLabel, "NanoMIDI: Invalid API JSON")
+            return
+        end
+
+        local items = data.data or data.midis or data.songs or data
+        if type(items) ~= "table" then
             NanoState.loadingList = false
             setLabelSafe(NanoStatusLabel, "NanoMIDI: Invalid API JSON")
             return
@@ -1538,13 +2363,22 @@ local function refreshNanoSongs(silent)
         table.clear(NanoState.apiData)
         table.clear(NanoState.order)
 
-        for _, song in ipairs(data) do
-            local label = tostring(song.name or "Untitled") .. " - " .. formatArtists(song.artists)
-            if NanoState.apiData[label] then
-                label = label .. " (" .. tostring(song.midiFilename or #NanoState.order + 1) .. ")"
+        for _, song in ipairs(items) do
+            if type(song) == "table" then
+                local baseLabel = tostring(song.name or "Untitled") .. " - " .. formatArtists(song.artists)
+                local label = baseLabel
+                if NanoState.apiData[label] then
+                    local withFile = baseLabel .. " (" .. tostring(song.midiFilename or #NanoState.order + 1) .. ")"
+                    label = withFile
+                    local suffix = 2
+                    while NanoState.apiData[label] do
+                        label = withFile .. " #" .. tostring(suffix)
+                        suffix = suffix + 1
+                    end
+                end
+                table.insert(NanoState.order, label)
+                NanoState.apiData[label] = song
             end
-            table.insert(NanoState.order, label)
-            NanoState.apiData[label] = song
         end
 
         NanoState.loaded = true
@@ -1626,23 +2460,571 @@ NanoTab:CreateButton({
 })
 
 -- ==========================================
--- Tab 4: Global Search & Auto-Try Across All Sources
+-- Tab 4: MuseScore & MidiShow
 -- ==========================================
-GlobalTab:CreateSection("Search All Sources (Local + Quick Picks + NanoMIDI)")
+ExternalTab:CreateSection("MuseScore (Search & Direct Score URL)")
+
+local MuseStatusLabel = ExternalTab:CreateLabel("MuseScore: Enter a search term or score URL")
+local MuseDropdown -- forward declared
+
+local function updateMuseStatusLabel()
+    MuseState.statusActive = false
+    if #MuseState.order > 0 then
+        setLabelSafe(MuseStatusLabel, string.format("MuseScore: %d results for '%s'", #MuseState.order, MuseState.query))
+    elseif MuseState.query ~= "" then
+        setLabelSafe(MuseStatusLabel, string.format("MuseScore: 0 results for '%s'", MuseState.query))
+    else
+        setLabelSafe(MuseStatusLabel, "MuseScore: Enter a search term or score URL")
+    end
+end
+
+registerStopHook(function()
+    if MuseState.statusActive then
+        updateMuseStatusLabel()
+    end
+end)
+
+local function playMuseScoreEntry(rawUrlOrId, displayName, silent)
+    local target = normalizeMuseScoreInput(rawUrlOrId)
+    if not target or not isMuseScoreUrl(target) then
+        if not silent then
+            Rayfield:Notify({Title = "Invalid MuseScore Input", Content = "Enter a valid musescore.com URL or numeric score ID.", Duration = 3})
+        end
+        return
+    end
+
+    stopPlayback()
+    local myId = playbackId
+
+    task.spawn(function()
+        MuseState.statusActive = true
+        setLabelSafe(MuseStatusLabel, "MuseScore: Loading " .. tostring(displayName or target))
+        local ok, midiBody, err = fetchMuseScoreMidi(target, function()
+            return playbackId ~= myId
+        end)
+        if playbackId ~= myId then return end
+
+        if ok and midiBody then
+            local played = parseAndPlayMidi(midiBody, myId, function()
+                MuseState.statusActive = true
+                setLabelSafe(MuseStatusLabel, "MuseScore Playing: " .. tostring(displayName or target))
+            end)
+            if playbackId ~= myId then return end
+            if played then
+                updateMuseStatusLabel()
+            else
+                MuseState.statusActive = true
+                setLabelSafe(MuseStatusLabel, "MuseScore: Invalid MIDI data")
+                if not silent then
+                    Rayfield:Notify({Title = "MuseScore Parse Error", Content = "Downloaded MIDI could not be parsed.", Duration = 4})
+                end
+            end
+        else
+            MuseState.statusActive = true
+            setLabelSafe(MuseStatusLabel, "MuseScore Failed: " .. tostring(err))
+            if not silent then
+                Rayfield:Notify({Title = "MuseScore Load Failed", Content = tostring(err), Duration = 4})
+            end
+        end
+    end)
+end
+
+runMuseSearch = function(query, silent)
+    local clean = tostring(query or ""):match("^%s*(.-)%s*$")
+    MuseState.query = clean
+    MuseState.searchGeneration = MuseState.searchGeneration + 1
+    local myGen = MuseState.searchGeneration
+
+    if clean == "" then
+        MuseState.searching = false
+        table.clear(MuseState.map)
+        table.clear(MuseState.order)
+        MuseState.selected = setDropdownOptions(MuseDropdown, {}, "Enter search text above", function(v)
+            MuseState.suppressCallback = v
+        end)
+        updateMuseStatusLabel()
+        if refreshGlobalSearchResults then refreshGlobalSearchResults() end
+        return
+    end
+
+    MuseState.searching = true
+    MuseState.statusActive = true
+    setLabelSafe(MuseStatusLabel, "MuseScore: Searching '" .. clean .. "'...")
+
+    task.spawn(function()
+        local ok, results, err = searchMuseScore(clean)
+        if MuseState.searchGeneration ~= myGen then return end
+        MuseState.searching = false
+        if not ok then
+            MuseState.statusActive = true
+            setLabelSafe(MuseStatusLabel, "MuseScore Error: " .. tostring(err))
+            if not silent then
+                Rayfield:Notify({Title = "MuseScore Search Failed", Content = tostring(err), Duration = 4})
+            end
+            return
+        end
+
+        table.clear(MuseState.map)
+        table.clear(MuseState.order)
+
+        for _, item in ipairs(results) do
+            local baseLabel = string.format("%s (#%s)", item.title, item.id)
+            local label = baseLabel
+            local suffix = 2
+            while MuseState.map[label] do
+                label = baseLabel .. " [" .. tostring(suffix) .. "]"
+                suffix = suffix + 1
+            end
+            MuseState.map[label] = item.url
+            table.insert(MuseState.order, label)
+        end
+
+        MuseState.selected = setDropdownOptions(
+            MuseDropdown,
+            MuseState.order,
+            "No MuseScore results found",
+            function(v) MuseState.suppressCallback = v end
+        )
+        updateMuseStatusLabel()
+        if refreshGlobalSearchResults then refreshGlobalSearchResults() end
+    end)
+end
+
+local MuseSearchInput = ExternalTab:CreateInput({
+    Name = "🔍 Search MuseScore",
+    CurrentValue = "",
+    PlaceholderText = "Search score title & press Enter",
+    RemoveTextAfterFocusLost = false,
+    Flag = "MuseSearchInput",
+    Callback = function(Text)
+        runMuseSearch(Text, false)
+    end,
+})
+
+ExternalTab:CreateButton({
+    Name = "🔄 Clear MuseScore Search",
+    Callback = function()
+        pcall(function() MuseSearchInput:Set("") end)
+        runMuseSearch("", false)
+    end,
+})
+
+MuseDropdown = ExternalTab:CreateDropdown({
+    Name = "MuseScore Results",
+    Options = {"Search MuseScore above"},
+    CurrentOption = {"Search MuseScore above"},
+    MultipleOptions = false,
+    Flag = "MuseScoreSelect",
+    Callback = function(Option)
+        local chosen = type(Option) == "table" and Option[1] or Option
+        MuseState.selected = MuseState.map[chosen] and chosen or nil
+        if not MuseState.suppressCallback and MuseState.autoPlayOnSelect and MuseState.selected then
+            playMuseScoreEntry(MuseState.map[MuseState.selected], MuseState.selected, false)
+        end
+    end,
+})
+
+ExternalTab:CreateToggle({
+    Name = "⚡ Auto-Play MuseScore on Select",
+    CurrentValue = false,
+    Flag = "MuseAutoPlayToggle",
+    Callback = function(Value)
+        MuseState.autoPlayOnSelect = Value
+    end,
+})
+
+ExternalTab:CreateButton({
+    Name = "▶️ Play Selected MuseScore",
+    Callback = function()
+        local url = MuseState.selected and MuseState.map[MuseState.selected]
+        if not url then
+            Rayfield:Notify({Title = "No Score Selected", Content = "Search and select a MuseScore result first.", Duration = 3})
+            return
+        end
+        playMuseScoreEntry(url, MuseState.selected, false)
+    end,
+})
+
+ExternalTab:CreateButton({
+    Name = "⚡ Auto-Try MuseScore Results",
+    Callback = function()
+        if #MuseState.order == 0 then
+            Rayfield:Notify({Title = "No Results", Content = "Search MuseScore first.", Duration = 3})
+            return
+        end
+        local candidates = {}
+        for _, label in ipairs(MuseState.order) do
+            if MuseState.map[label] then
+                table.insert(candidates, {label = label, url = MuseState.map[label]})
+            end
+        end
+
+        stopPlayback()
+        local myId = playbackId
+
+        task.spawn(function()
+            for idx, entry in ipairs(candidates) do
+                if playbackId ~= myId then return end
+                MuseState.statusActive = true
+                setLabelSafe(MuseStatusLabel, string.format("MuseScore auto-trying (%d/%d): %s", idx, #candidates, entry.label))
+                local ok, midiBody = fetchMuseScoreMidi(entry.url, function()
+                    return playbackId ~= myId
+                end)
+                if playbackId ~= myId then return end
+                if ok and midiBody then
+                    local played = parseAndPlayMidi(midiBody, myId, function()
+                        MuseState.statusActive = true
+                        setLabelSafe(MuseStatusLabel, "MuseScore Playing: " .. entry.label)
+                        Rayfield:Notify({Title = "MuseScore Playing", Content = entry.label, Duration = 3})
+                    end)
+                    if playbackId ~= myId then return end
+                    if played then
+                        updateMuseStatusLabel()
+                        return
+                    end
+                end
+            end
+            if playbackId == myId then
+                updateMuseStatusLabel()
+                Rayfield:Notify({Title = "MuseScore Auto-Try Failed", Content = "No playable MIDI found in current results.", Duration = 4})
+            end
+        end)
+    end,
+})
+
+local customMuseUrl = ""
+ExternalTab:CreateInput({
+    Name = "MuseScore URL or Score ID",
+    CurrentValue = "",
+    PlaceholderText = "https://musescore.com/user/.../scores/5352121 or 5352121",
+    RemoveTextAfterFocusLost = false,
+    Flag = "CustomMuseUrl",
+    Callback = function(Text)
+        customMuseUrl = Text
+    end,
+})
+
+ExternalTab:CreateButton({
+    Name = "▶️ Play MuseScore URL / ID",
+    Callback = function()
+        playMuseScoreEntry(customMuseUrl, nil, false)
+    end,
+})
+
+ExternalTab:CreateSection("MidiShow (Search & Direct MIDI URL)")
+
+local MidiShowStatusLabel = ExternalTab:CreateLabel("MidiShow: Enter a search term or midishow.com URL")
+local MidiShowDropdown -- forward declared
+
+local function updateMidiShowStatusLabel()
+    MidiShowState.statusActive = false
+    if #MidiShowState.order > 0 then
+        setLabelSafe(MidiShowStatusLabel, string.format("MidiShow: %d results for '%s'", #MidiShowState.order, MidiShowState.query))
+    elseif MidiShowState.query ~= "" then
+        setLabelSafe(MidiShowStatusLabel, string.format("MidiShow: 0 results for '%s'", MidiShowState.query))
+    else
+        setLabelSafe(MidiShowStatusLabel, "MidiShow: Enter a search term or midishow.com URL")
+    end
+end
+
+registerStopHook(function()
+    if MidiShowState.statusActive then
+        updateMidiShowStatusLabel()
+    end
+end)
+
+local function playMidiShowEntry(rawUrlOrId, displayName, silent)
+    local target = normalizeMidiShowInput(rawUrlOrId)
+    if not target or not isMidiShowUrl(target) then
+        if not silent then
+            Rayfield:Notify({Title = "Invalid MidiShow Input", Content = "Enter a valid midishow.com URL or numeric MIDI ID.", Duration = 3})
+        end
+        return
+    end
+
+    stopPlayback()
+    local myId = playbackId
+
+    task.spawn(function()
+        MidiShowState.statusActive = true
+        setLabelSafe(MidiShowStatusLabel, "MidiShow: Loading " .. tostring(displayName or target))
+        local ok, midiBody, err = fetchMidiShowMidi(target, function()
+            return playbackId ~= myId
+        end)
+        if playbackId ~= myId then return end
+
+        if ok and midiBody then
+            local played = parseAndPlayMidi(midiBody, myId, function()
+                MidiShowState.statusActive = true
+                setLabelSafe(MidiShowStatusLabel, "MidiShow Playing: " .. tostring(displayName or target))
+            end)
+            if playbackId ~= myId then return end
+            if played then
+                updateMidiShowStatusLabel()
+            else
+                MidiShowState.statusActive = true
+                setLabelSafe(MidiShowStatusLabel, "MidiShow: Invalid MIDI data")
+                if not silent then
+                    Rayfield:Notify({Title = "MidiShow Parse Error", Content = "Decoded MIDI could not be parsed.", Duration = 4})
+                end
+            end
+        else
+            MidiShowState.statusActive = true
+            setLabelSafe(MidiShowStatusLabel, "MidiShow Failed: " .. tostring(err))
+            if not silent then
+                Rayfield:Notify({Title = "MidiShow Load Failed", Content = tostring(err), Duration = 5})
+            end
+        end
+    end)
+end
+
+runMidiShowSearch = function(query, silent)
+    local clean = tostring(query or ""):match("^%s*(.-)%s*$")
+    MidiShowState.query = clean
+    MidiShowState.searchGeneration = MidiShowState.searchGeneration + 1
+    local myGen = MidiShowState.searchGeneration
+
+    if clean == "" then
+        MidiShowState.searching = false
+        table.clear(MidiShowState.map)
+        table.clear(MidiShowState.order)
+        MidiShowState.selected = setDropdownOptions(MidiShowDropdown, {}, "Enter search text above", function(v)
+            MidiShowState.suppressCallback = v
+        end)
+        updateMidiShowStatusLabel()
+        if refreshGlobalSearchResults then refreshGlobalSearchResults() end
+        return
+    end
+
+    MidiShowState.searching = true
+    MidiShowState.statusActive = true
+    setLabelSafe(MidiShowStatusLabel, "MidiShow: Searching '" .. clean .. "'...")
+
+    task.spawn(function()
+        local ok, results, err = searchMidiShow(clean)
+        if MidiShowState.searchGeneration ~= myGen then return end
+        MidiShowState.searching = false
+        if not ok then
+            MidiShowState.statusActive = true
+            setLabelSafe(MidiShowStatusLabel, "MidiShow Error: " .. tostring(err))
+            if not silent then
+                Rayfield:Notify({Title = "MidiShow Search Failed", Content = tostring(err), Duration = 5})
+            end
+            return
+        end
+
+        table.clear(MidiShowState.map)
+        table.clear(MidiShowState.order)
+
+        for _, item in ipairs(results) do
+            local baseLabel = string.format("%s (#%s)", item.title, item.id)
+            local label = baseLabel
+            local suffix = 2
+            while MidiShowState.map[label] do
+                label = baseLabel .. " [" .. tostring(suffix) .. "]"
+                suffix = suffix + 1
+            end
+            MidiShowState.map[label] = item.url
+            table.insert(MidiShowState.order, label)
+        end
+
+        MidiShowState.selected = setDropdownOptions(
+            MidiShowDropdown,
+            MidiShowState.order,
+            "No MidiShow results found",
+            function(v) MidiShowState.suppressCallback = v end
+        )
+        updateMidiShowStatusLabel()
+        if refreshGlobalSearchResults then refreshGlobalSearchResults() end
+    end)
+end
+
+local MidiShowSearchInput = ExternalTab:CreateInput({
+    Name = "🔍 Search MidiShow",
+    CurrentValue = "",
+    PlaceholderText = "Search midishow.com & press Enter",
+    RemoveTextAfterFocusLost = false,
+    Flag = "MidiShowSearchInput",
+    Callback = function(Text)
+        runMidiShowSearch(Text, false)
+    end,
+})
+
+ExternalTab:CreateButton({
+    Name = "🔄 Clear MidiShow Search",
+    Callback = function()
+        pcall(function() MidiShowSearchInput:Set("") end)
+        runMidiShowSearch("", false)
+    end,
+})
+
+MidiShowDropdown = ExternalTab:CreateDropdown({
+    Name = "MidiShow Results",
+    Options = {"Search MidiShow above"},
+    CurrentOption = {"Search MidiShow above"},
+    MultipleOptions = false,
+    Flag = "MidiShowSelect",
+    Callback = function(Option)
+        local chosen = type(Option) == "table" and Option[1] or Option
+        MidiShowState.selected = MidiShowState.map[chosen] and chosen or nil
+        if not MidiShowState.suppressCallback and MidiShowState.autoPlayOnSelect and MidiShowState.selected then
+            playMidiShowEntry(MidiShowState.map[MidiShowState.selected], MidiShowState.selected, false)
+        end
+    end,
+})
+
+ExternalTab:CreateToggle({
+    Name = "⚡ Auto-Play MidiShow on Select",
+    CurrentValue = false,
+    Flag = "MidiShowAutoPlayToggle",
+    Callback = function(Value)
+        MidiShowState.autoPlayOnSelect = Value
+    end,
+})
+
+ExternalTab:CreateButton({
+    Name = "▶️ Play Selected MidiShow",
+    Callback = function()
+        local url = MidiShowState.selected and MidiShowState.map[MidiShowState.selected]
+        if not url then
+            Rayfield:Notify({Title = "No MIDI Selected", Content = "Search and select a MidiShow result first.", Duration = 3})
+            return
+        end
+        playMidiShowEntry(url, MidiShowState.selected, false)
+    end,
+})
+
+ExternalTab:CreateButton({
+    Name = "⚡ Auto-Try MidiShow Results",
+    Callback = function()
+        if #MidiShowState.order == 0 then
+            Rayfield:Notify({Title = "No Results", Content = "Search MidiShow first.", Duration = 3})
+            return
+        end
+        local candidates = {}
+        for _, label in ipairs(MidiShowState.order) do
+            if MidiShowState.map[label] then
+                table.insert(candidates, {label = label, url = MidiShowState.map[label]})
+            end
+        end
+
+        stopPlayback()
+        local myId = playbackId
+
+        task.spawn(function()
+            for idx, entry in ipairs(candidates) do
+                if playbackId ~= myId then return end
+                MidiShowState.statusActive = true
+                setLabelSafe(MidiShowStatusLabel, string.format("MidiShow auto-trying (%d/%d): %s", idx, #candidates, entry.label))
+                local ok, midiBody = fetchMidiShowMidi(entry.url, function()
+                    return playbackId ~= myId
+                end)
+                if playbackId ~= myId then return end
+                if ok and midiBody then
+                    local played = parseAndPlayMidi(midiBody, myId, function()
+                        MidiShowState.statusActive = true
+                        setLabelSafe(MidiShowStatusLabel, "MidiShow Playing: " .. entry.label)
+                        Rayfield:Notify({Title = "MidiShow Playing", Content = entry.label, Duration = 3})
+                    end)
+                    if playbackId ~= myId then return end
+                    if played then
+                        updateMidiShowStatusLabel()
+                        return
+                    end
+                end
+            end
+            if playbackId == myId then
+                updateMidiShowStatusLabel()
+                Rayfield:Notify({Title = "MidiShow Auto-Try Failed", Content = "No playable MIDI found in current results.", Duration = 4})
+            end
+        end)
+    end,
+})
+
+local customMidiShowUrl = ""
+ExternalTab:CreateInput({
+    Name = "MidiShow URL or MIDI ID",
+    CurrentValue = "",
+    PlaceholderText = "https://www.midishow.com/en/midi/36409.html or 36409",
+    RemoveTextAfterFocusLost = false,
+    Flag = "CustomMidiShowUrl",
+    Callback = function(Text)
+        customMidiShowUrl = Text
+    end,
+})
+
+ExternalTab:CreateButton({
+    Name = "▶️ Play MidiShow URL / ID",
+    Callback = function()
+        playMidiShowEntry(customMidiShowUrl, nil, false)
+    end,
+})
+
+ExternalTab:CreateInput({
+    Name = "MidiShow Cookie (Optional, if 403/Cloudflare)",
+    CurrentValue = "",
+    PlaceholderText = "Paste midishow.com Cookie header if required",
+    RemoveTextAfterFocusLost = false,
+    Flag = "MidiShowCookieInput",
+    Callback = function(Text)
+        MidiShowState.cookie = tostring(Text or ""):match("^%s*(.-)%s*$")
+    end,
+})
+
+ExternalTab:CreateButton({
+    Name = "⏹️ Stop",
+    Callback = stopPlayback,
+})
+
+-- ==========================================
+-- Tab 5: Global Search & Auto-Try Across All Sources
+-- ==========================================
+GlobalTab:CreateSection("Search All Sources (Local + Quick Picks + NanoMIDI + MuseScore + MidiShow)")
 
 local GlobalStatusLabel = GlobalTab:CreateLabel("Global Search: Enter a song name to search all sources")
 local GlobalDropdown -- forward declared
+
+local function updateGlobalStatusLabel()
+    GlobalState.statusActive = false
+    local shown = #GlobalState.resultsOrder
+    local total = GlobalState.totalMatches
+    if GlobalState.query ~= "" then
+        if total > shown then
+            setLabelSafe(GlobalStatusLabel, string.format("Global Search: showing %d of %d matches", shown, total))
+        else
+            setLabelSafe(GlobalStatusLabel, string.format("Global Search: %d matches found", total))
+        end
+    else
+        setLabelSafe(GlobalStatusLabel, string.format(
+            "Global Search: Showing %d songs (Local %d | Quick %d | Nano %d | Muse %d | MidiShow %d)",
+            shown, #LocalState.order, #QuickState.order, #NanoState.order, #MuseState.order, #MidiShowState.order
+        ))
+    end
+end
+
+registerStopHook(function()
+    if GlobalState.statusActive then
+        updateGlobalStatusLabel()
+    end
+end)
 
 local function buildGlobalMatches(query)
     local allEntries = {}
     local displayNames = {}
     local seenKeys = {}
+    local totalMatches = 0
 
     local function addEntry(sourceTag, label, entry)
         if not matchesQuery(label, query) then return end
-        local display = "[" .. sourceTag .. "] " .. label
-        if seenKeys[display] then
-            display = display .. " #" .. tostring(#displayNames + 1)
+        totalMatches = totalMatches + 1
+        if #displayNames >= MAX_DROPDOWN_ITEMS then return end
+
+        local baseDisplay = "[" .. sourceTag .. "] " .. label
+        local display = baseDisplay
+        local suffix = 2
+        while seenKeys[display] do
+            display = baseDisplay .. " #" .. tostring(suffix)
+            suffix = suffix + 1
         end
         seenKeys[display] = true
         entry.display = display
@@ -1652,37 +3034,43 @@ local function buildGlobalMatches(query)
 
     for _, label in ipairs(LocalState.order) do
         addEntry("Local", label, {kind = "local", label = label, path = LocalState.files[label]})
-        if #displayNames >= MAX_DROPDOWN_ITEMS then break end
     end
 
-    if #displayNames < MAX_DROPDOWN_ITEMS then
-        for _, label in ipairs(QuickState.order) do
-            addEntry("QuickPick", label, {kind = "url", label = label, url = QuickState.map[label]})
-            if #displayNames >= MAX_DROPDOWN_ITEMS then break end
+    for _, label in ipairs(QuickState.order) do
+        addEntry("QuickPick", label, {kind = "url", label = label, url = QuickState.map[label]})
+    end
+
+    for _, label in ipairs(MuseState.order) do
+        if MuseState.map[label] then
+            addEntry("MuseScore", label, {kind = "musescore", label = label, url = MuseState.map[label]})
         end
     end
 
-    if #displayNames < MAX_DROPDOWN_ITEMS then
-        for _, label in ipairs(NanoState.order) do
-            local song = NanoState.apiData[label]
-            if song and song.midiFilename then
-                addEntry("NanoMIDI", label, {
-                    kind = "nano",
-                    label = label,
-                    url = "https://api.nanomidi.net/api/midis/" .. encodeUrlPath(tostring(song.midiFilename)),
-                })
-            end
-            if #displayNames >= MAX_DROPDOWN_ITEMS then break end
+    for _, label in ipairs(MidiShowState.order) do
+        if MidiShowState.map[label] then
+            addEntry("MidiShow", label, {kind = "midishow", label = label, url = MidiShowState.map[label]})
         end
     end
 
-    return allEntries, displayNames
+    for _, label in ipairs(NanoState.order) do
+        local song = NanoState.apiData[label]
+        if song and song.midiFilename then
+            addEntry("NanoMIDI", label, {
+                kind = "nano",
+                label = label,
+                url = "https://api.nanomidi.net/api/midis/" .. encodeUrlPath(tostring(song.midiFilename)),
+            })
+        end
+    end
+
+    return allEntries, displayNames, totalMatches
 end
 
 refreshGlobalSearchResults = function()
-    local map, names = buildGlobalMatches(GlobalState.query)
+    local map, names, totalMatches = buildGlobalMatches(GlobalState.query)
     GlobalState.resultsMap = map
     GlobalState.resultsOrder = names
+    GlobalState.totalMatches = totalMatches
     GlobalState.selected = setDropdownOptions(
         GlobalDropdown,
         names,
@@ -1690,11 +3078,7 @@ refreshGlobalSearchResults = function()
         function(v) GlobalState.suppressCallback = v end
     )
 
-    if GlobalState.query ~= "" then
-        setLabelSafe(GlobalStatusLabel, string.format("Global Search: %d matches found", #names))
-    else
-        setLabelSafe(GlobalStatusLabel, string.format("Global Search: Showing %d songs (Local %d | Quick %d | Nano %d)", #names, #LocalState.order, #QuickState.order, #NanoState.order))
-    end
+    updateGlobalStatusLabel()
 end
 
 local function tryLoadGlobalEntry(entry, myId)
@@ -1710,8 +3094,18 @@ local function tryLoadGlobalEntry(entry, myId)
             return playbackId ~= myId
         end)
         return ok, midiBody
+    elseif entry.kind == "musescore" then
+        local ok, midiBody = fetchMuseScoreMidi(entry.url, function()
+            return playbackId ~= myId
+        end)
+        return ok, midiBody
+    elseif entry.kind == "midishow" then
+        local ok, midiBody = fetchMidiShowMidi(entry.url, function()
+            return playbackId ~= myId
+        end)
+        return ok, midiBody
     else
-        local ok, midiBody = fetchMidiBytesWithRetry(entry.url, nil, function()
+        local ok, midiBody = resolveAndFetchMidiUrl(entry.url, function()
             return playbackId ~= myId
         end)
         return ok, midiBody
@@ -1730,6 +3124,26 @@ local GlobalSearchInput = GlobalTab:CreateInput({
             refreshNanoSongs(true)
         end
         refreshGlobalSearchResults()
+        if GlobalState.liveExternalSearch then
+            local clean = GlobalState.query:match("^%s*(.-)%s*$")
+            if clean ~= "" then
+                if MuseState.query ~= clean then
+                    runMuseSearch(clean, true)
+                end
+                if MidiShowState.query ~= clean then
+                    runMidiShowSearch(clean, true)
+                end
+            end
+        end
+    end,
+})
+
+GlobalTab:CreateToggle({
+    Name = "🌐 Live Search MuseScore & MidiShow",
+    CurrentValue = true,
+    Flag = "GlobalLiveExternalToggle",
+    Callback = function(Value)
+        GlobalState.liveExternalSearch = Value
     end,
 })
 
@@ -1757,19 +3171,29 @@ GlobalTab:CreateButton({
         end
 
         stopPlayback()
-        loading = true
         local myId = playbackId
 
         task.spawn(function()
+            GlobalState.statusActive = true
             setLabelSafe(GlobalStatusLabel, "Loading: " .. entry.display)
             local ok, midiBody = tryLoadGlobalEntry(entry, myId)
             if playbackId ~= myId then return end
-            loading = false
 
             if ok and midiBody then
-                setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
-                parseAndPlayMidi(midiBody, myId)
+                local played = parseAndPlayMidi(midiBody, myId, function()
+                    GlobalState.statusActive = true
+                    setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
+                end)
+                if playbackId ~= myId then return end
+                if played then
+                    updateGlobalStatusLabel()
+                else
+                    GlobalState.statusActive = true
+                    setLabelSafe(GlobalStatusLabel, "Invalid MIDI: " .. entry.display)
+                    Rayfield:Notify({Title = "MIDI Parse Error", Content = "Try 'Auto-Try Matching Songs' to test other sources.", Duration = 4})
+                end
             else
+                GlobalState.statusActive = true
                 setLabelSafe(GlobalStatusLabel, "Failed: " .. entry.display)
                 Rayfield:Notify({Title = "Song Load Failed", Content = "Try 'Auto-Try Matching Songs' to test other sources.", Duration = 4})
             end
@@ -1794,27 +3218,32 @@ GlobalTab:CreateButton({
         end
 
         stopPlayback()
-        loading = true
         local myId = playbackId
 
         task.spawn(function()
             for idx, entry in ipairs(queue) do
                 if playbackId ~= myId then return end
+                GlobalState.statusActive = true
                 setLabelSafe(GlobalStatusLabel, string.format("Auto-trying (%d/%d): %s", idx, #queue, entry.display))
                 local ok, midiBody = tryLoadGlobalEntry(entry, myId)
                 if playbackId ~= myId then return end
 
                 if ok and midiBody then
-                    loading = false
-                    setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
-                    Rayfield:Notify({Title = "Auto-Loaded & Playing", Content = entry.display, Duration = 3})
-                    parseAndPlayMidi(midiBody, myId)
-                    return
+                    local played = parseAndPlayMidi(midiBody, myId, function()
+                        GlobalState.statusActive = true
+                        setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
+                        Rayfield:Notify({Title = "Auto-Loaded & Playing", Content = entry.display, Duration = 3})
+                    end)
+                    if playbackId ~= myId then return end
+                    if played then
+                        updateGlobalStatusLabel()
+                        return
+                    end
                 end
             end
 
             if playbackId == myId then
-                loading = false
+                GlobalState.statusActive = true
                 setLabelSafe(GlobalStatusLabel, "Auto-try finished: no working MIDI found")
                 Rayfield:Notify({Title = "Auto-Try Failed", Content = "None of the matching entries returned valid MIDI.", Duration = 4})
             end
