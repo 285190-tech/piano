@@ -1,2 +1,33 @@
-# piano
-rooblos scritp
+# Universal Piano
+
+`piano.lua` plays MIDI files and virtual-piano text sheets by sending keypresses to a Roblox piano. It uses executor-specific APIs and isn't a Roblox Studio script. The UI still downloads and executes Rayfield at startup; the Rayfield source is not part of this repository.
+
+- **Stage:** Queue a song from any of the source tabs, then choose **Preload Next** to check it without playing. **Play Next** starts it on cue; the next song never auto-starts. Reorder songs with **Move Selected Up / Down** or **Shuffle Queue**; shuffle never starts playback. **Stop** cancels playback or a pending cue without clearing the queue.
+- **Live cues:** Set **Cue Countdown** to 1–5 seconds to give yourself time to refocus the piano after cueing a song. **Encore** replays the last song cued from Stage without downloading it again or advancing the queue.
+- **Stage hotkeys (optional):** Turn them on in Stage for **F6** (Play Next), **F7** (Pause / Resume), and **F8** (Stop). Opening a Roblox text box pauses playback and releases held keys; closing it does not resume the song. Stop still works from a text box when the hotkeys are enabled.
+- **Per-song MIDI settings:** Set transpose, channel, hold, pedal, octave fitting, and drum filtering in **Playback**, then select a queued song and use **Pin Current MIDI Settings to Selected Song** in **Stage**. Saved setlists retain each song’s settings. **Clear Selected Song Settings** returns it to the global defaults. The keyboard layout still follows the current experience.
+- **Saved Setlists:** Enter a name and click **Save Queue by Name** before the show. Select it later and click **Load Saved Setlist (Replace Queue)** to restore the lineup without playing it. Saves stay in a local JSON file and require a runtime with workspace file access. The file stores links, local MIDI paths, and pasted text sheets—not downloaded MIDI copies.
+- **Keyboard Setup:** Keep the standard Virtual Piano layout, or enter your experience's mapping as a starting MIDI note and one key per semitone. For example, `60:a.s.df` starts at middle C, uses `.` for missing notes, and assigns `a`, `s`, `d`, and `f` to playable notes. Capitals and shifted digit symbols send Shift. **Save Active Mapping for This Experience** remembers the choice locally when workspace file access is available. Text sheets still send their literal keys.
+- **Soundcheck:** Check the active layout before a set. Focus the piano during the lead-in and listen for short notes, a chord when enough distinct physical keys exist, and a longer held note. Remapping helps only if the piano already accepts keyboard input. Touch-only pianos and rhythm tiles are not supported.
+- **Quick Picks & URL:** Browse 328 songs by category or search by title, artist, or game. Search words can appear in any order, and `pokemon` matches `Pokémon`. Results are shown 40 at a time; **Queue Quick Pick** still sends the selected song straight to Stage. The default catalog is synced from [`q-29/piano`](https://github.com/q-29/piano)'s `main` branch, with a built-in fallback that stays in place if startup sync still finds an older, smaller list without categories.
+- **Favorites:** Select a Quick Pick and click **Favorite / Unfavorite Selected Song**. Turn on **Favorites Only** to narrow the results; it works alongside search and category filters. Favorites are stored locally by title when workspace file writing is available, otherwise they last for the session.
+- **Local & Sheets:** Choose a local MIDI file or paste a sheet such as `[tu] y [ro] | a [sd]`. Brackets play a chord; spaces *inside* brackets roll the notes in sequence. Add `~` right after a note or chord to extend it by one step per `~`, for example `[tu]~~`.
+- **Playback:** See elapsed time and duration, pause or resume, stop, loop the current song, or change speed without restarting. Note options apply on the next play.
+  - **Hold Keys for Note Length** is on by default. Keys are held for the MIDI note or text-sheet step instead of being tapped.
+  - **Follow MIDI Pedal** extends held notes when the file uses a sustain pedal. **Skip MIDI Drums** keeps channel 10 percussion from playing as piano notes. Both are on by default.
+  - **Auto-Fit MIDI to Keyboard** is on by default. It shifts the whole song by octaves only if that puts more notes in range. The Playback tab reports the total pitch shift and number of mapped notes. Turn off Auto-Fit if you want only the manual **MIDI Transpose** applied. **Fold Out-of-Range Notes into Piano Range** can move individual notes that still don't fit.
+  - **MIDI Channel (0 = All)** lets you isolate a melody or another part. **Preload Next** reports which channels occur in the file. At `0`, the normal drum filter still applies. Choosing a specific channel—including channel 10—plays just that channel. You can preload again after changing the layout or channel without re-downloading the song.
+- **Practice:** While playing or paused, use **Jump to Time** (seconds or `m:ss`) or the five-second skip buttons. Mark **A** and **B** to repeat just that passage. Seek outside the passage or use **Clear Practice Loop** to return to normal playback.
+- **NanoMIDI API:** Browse and play from the NanoMIDI catalog.
+
+MIDI formats 0 and 1 are supported. Pedal support works by holding keys longer, not by adding a pedal to the Roblox piano. It does not reproduce MIDI velocity or real pedal resonance. Notes that share one physical key cannot be held at the same time. After a long client stutter, playback skips expired taps and restores only still-active held notes instead of sending the missed notes in a burst.
+
+See [the performance plan and compatibility review](docs/performance-plan.md). Use arrangements you have permission to use, in experiences that permit automation.
+
+Run the mocked playback and setlist tests with `sh tests/run.sh` and the standalone [Luau CLI](https://luau.org/) on your path. The tests don't launch Roblox or contact song hosts.
+
+## Catalog verification
+
+Run `python3 tests/verify_catalog.py` with Git and the standalone Luau CLI on your path. It verifies the exact, commit-pinned file behind every `songs.json` URL and confirms each file produces playable notes with the script’s MIDI parser. It also checks that the built-in fallback matches the JSON. The check uses GitHub's Git transport and does not measure Roblox or raw-CDN availability.
+
+The catalog links to the original hosting repositories rather than bundling their MIDI files. New pieces come from [thewildwestmidis/midis](https://github.com/thewildwestmidis/midis), the [Piano Buddy catalog](https://github.com/bubagump02/piano-buddy-catalogue), and [classical_ancient_midifiles](https://github.com/narcisse-dev/classical_ancient_midifiles). A verified file and a commit pin do not establish reuse rights or guarantee future availability.
