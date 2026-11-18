@@ -4,13 +4,11 @@ local HttpService = game:GetService("HttpService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
 -- ==========================================
--- Built-in Fallback Quick Picks
+-- Built-in Fallback Quick Picks (Validated)
 -- ==========================================
 local DEFAULT_QUICKPICKS = {
     {name = "Tokyo Ghoul - Unravel (Full)", url = "https://raw.githubusercontent.com/callmeyyzx/midi/main/%E3%80%90%E4%B8%9C%E4%BA%AC%E5%96%B0%E7%A7%8D%E4%B8%9C%E4%BA%AC%E9%A3%9F%E5%B0%B8%E9%AC%BC%E3%80%91OP-------Unravel.mid"},
     {name = "Tokyo Ghoul - Unravel (Simple)", url = "https://raw.githubusercontent.com/MAraragi/MusicalScoreRecognition/master/new_midi_file/unravel_after.mid"},
-    {name = "Squid Game - Way Back Then", url = "https://drive.google.com/uc?export=download&id=1sKk0g3fmmXMEwrWgE239Bh_mnIC_5NeK"},
-    {name = "Squid Game 2 - Mingle Game (Round and Round)", url = "https://drive.google.com/uc?export=download&id=1pDXaMuoX_7v5m_-O0hkxzcGie_txl9Au"},
     {name = "JoJo - Giorno's Theme (Golden Wind)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Golden%20Wind_JJBA_Giorno_Giovannas_Theme_SOLO.mid"},
     {name = "JoJo - Bloody Stream", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Bloody%20Stream%20%28JoJo%27s%20Bizarre%20Adventure%29.mid"},
     {name = "JoJo - Awaken (Pillar Men)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Jojo%27s%20Bizarre%20Adventure-%20Awaken%20%28Pillar%20Men%20theme%29.mid"},
@@ -57,17 +55,17 @@ local DEFAULT_QUICKPICKS = {
     {name = "Minecraft - Subwoofer Lullaby", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Subwoofer%20Lullaby-C418-%20Minecraft.mid"},
     {name = "Minecraft - Aria Math", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Aria%20Math%20-%20C418.mid"},
     {name = "Minecraft - Pigstep", url = "https://raw.githubusercontent.com/callmeyyzx/midi/main/Pigstep__Minecraft.mid"},
-    {name = "FNAF 1 Song - The Living Tombstone", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/FNAF%201%20Song%20-%20The%20Living%20Tombstone.mid"},
-    {name = "Geometry Dash - Stereo Madness", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Geometry%20Dash%20-%20Stereo%20Madness.mid"},
-    {name = "Bad Piggies Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Bad%20Piggies%20Theme.mid"},
+    {name = "FNAF 1 Song - The Living Tombstone", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Five%20Nights%20At%20Freddy%27s%20-%20Living%20Tombstone.mid"},
+    {name = "Geometry Dash - Back on Track", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Back%20on%20Track%20Geometry%20dash.mid"},
+    {name = "Bad Piggies Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Bad%20Piggies%20-%20Main%20Theme%20by%20Funkfan.mid"},
     {name = "Zelda OoT - Song of Storms", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/The%20Legend%20of%20Zelda%20Ocarina%20of%20Time%20-%20Song%20of%20Storms.mid"},
     {name = "Super Mario Bros Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Mario%20Bros.%20-%20Super%20Mario%20Bros.%20Theme.mid"},
     {name = "Super Mario 64 - Inside the Castle Walls", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Inside%20the%20Castle%20Walls%20-%20Super%20Mario%2064.mid"},
     {name = "Tetris - A Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Tetris%20-%20A%20Theme.mid"},
     {name = "Pokemon Center Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Pokemon%20-%20Pokemon%20Center%20Theme.mid"},
     {name = "Wii - Mii Channel Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Mii%20Channel%20Theme%20%28Pixel-Phil%29.mid"},
-    {name = "Harry Potter - Hedwig's Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Harry%20Potter%20-%20Hedwig%27s%20Theme.mid"},
-    {name = "Pirates of the Caribbean - He's a Pirate", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Pirates%20of%20the%20Caribbean%20-%20He%27s%20a%20Pirate.mid"},
+    {name = "Harry Potter - Hedwig's Theme", url = "https://raw.githubusercontent.com/reality3d/3d-piano-player/master/midi/hedwigs_theme.mid"},
+    {name = "Pirates of the Caribbean - He's a Pirate", url = "https://raw.githubusercontent.com/reality3d/3d-piano-player/master/midi/hes_a_pirate.mid"},
     {name = "Interstellar - Main Theme (Hans Zimmer)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Interstellar%20Main%20Theme-%20Hans%20Zimmer.mid"},
     {name = "Inception - Time (Hans Zimmer)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Hans%20Zimmer%20-%20Time.mid"},
     {name = "How to Train Your Dragon - Test Drive", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/How%20to%20train%20your%20dragon%20-%20Test%20Drive.mid"},
@@ -77,13 +75,13 @@ local DEFAULT_QUICKPICKS = {
     {name = "Coldplay - Viva La Vida", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Coldplay%20-%20Viva%20La%20Vida.mid"},
     {name = "Coldplay - Clocks", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Coldplay%20-%20Clocks%20%28Full%20Song%29.mid"},
     {name = "Billy Joel - Piano Man", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Billy%20Joel%20-%20Piano%20Man.mid"},
-    {name = "a-ha - Take On Me", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/A-ha%20-%20Take%20on%20me.mid"},
+    {name = "a-ha - Take On Me", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/A%20HA.Take%20on%20me%20K.mid"},
     {name = "ABBA - Dancing Queen", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/ABBA%20-%20Dancing%20Queen.mid"},
-    {name = "Smash Mouth - All Star", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/All%20Star%20-%20Smash%20Mouth.mid"},
-    {name = "George Michael - Careless Whisper", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Careless%20Whisper%20-%20George%20Michael.mid"},
-    {name = "Astronomia (Coffin Dance)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Coffin%20Dance%20-%20Astronomia.mid"},
-    {name = "Alan Walker - Faded", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Faded%20-%20Alan%20Walker.mid"},
-    {name = "Avicii - Wake Me Up", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Avicii%20-%20Wake%20Me%20Up.mid"},
+    {name = "Smash Mouth - All Star", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/All%20Star.mid"},
+    {name = "George Michael - Careless Whisper", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Careless-Whisper.mid"},
+    {name = "Astronomia (Coffin Dance)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Coffin%20dance%20-%20Theme%20and%20variations.mid"},
+    {name = "Alan Walker - The Spectre", url = "https://raw.githubusercontent.com/callmeyyzx/midi/main/The_Spectre__Alan_Walker.mid"},
+    {name = "Avicii - Wake Me Up", url = "https://raw.githubusercontent.com/callmeyyzx/midi/main/wakemeup.mid"},
     {name = "It's Just a Burning Memory", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/It%27s%20just%20a%20burning%20memory%20-%20A1.mid"},
     {name = "Laufey - From The Start", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/From%20the%20start%20-%20Laufey.mid"},
     {name = "Arctic Monkeys - 505", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/505%20-%20Arctic%20Monkeys.mid"},
@@ -424,7 +422,7 @@ local function parseAndPlayMidi(midiString, myId)
     if not mthdIdx then
         warn("[Piano] Missing MThd header")
         if playbackId == myId then playing = false end
-        return
+        return false
     end
     if mthdIdx > 1 then
         midiString = midiString:sub(mthdIdx)
@@ -463,7 +461,7 @@ local function parseAndPlayMidi(midiString, myId)
     if not ok then
         warn("[Piano] MIDI parse error:", err)
         if playbackId == myId then playing = false end
-        return
+        return false
     end
 
     table.sort(events, function(a, b)
@@ -529,6 +527,7 @@ local function parseAndPlayMidi(midiString, myId)
     if playbackId == myId then
         playing = false
     end
+    return true
 end
 
 local function playTextSheet(sheet, bpm, myId)
@@ -602,11 +601,13 @@ local Window = Rayfield:CreateWindow({
 local QuickTab = Window:CreateTab("Quick Picks & URL", 4483362458)
 local LocalTab = Window:CreateTab("Local & Sheets", 4483362458)
 local NanoTab = Window:CreateTab("NanoMIDI API", 4483362458)
+local GlobalTab = Window:CreateTab("🔍 Global Search", 4483362458)
 
 -- ==========================================
--- HTTP & URL Helpers
+-- HTTP, Search & Auto-Load Helpers
 -- ==========================================
 local httpRequest = request or http_request or (syn and syn.request) or (http and http.request)
+local MAX_DROPDOWN_ITEMS = 200
 
 local function normalizeMidiUrl(url)
     local clean = tostring(url or ""):match("^%s*(.-)%s*$")
@@ -614,6 +615,28 @@ local function normalizeMidiUrl(url)
     clean = clean:gsub("^https?://github%.com/([^/]+)/([^/]+)/raw/(.+)$", "https://raw.githubusercontent.com/%1/%2/%3")
     clean = clean:gsub(" ", "%%20")
     return clean
+end
+
+local function buildRepoUrlCandidates(rawUrl)
+    local clean = normalizeMidiUrl(rawUrl)
+    local candidates = {}
+    local seen = {}
+    local function add(u)
+        if u and u ~= "" and not seen[u] then
+            seen[u] = true
+            table.insert(candidates, u)
+        end
+    end
+
+    add(clean)
+    if clean:find("raw%.githubusercontent%.com/[^/]+/[^/]+/refs/heads/") then
+        add((clean:gsub("(raw%.githubusercontent%.com/[^/]+/[^/]+)/refs/heads/", "%1/")))
+    elseif clean:find("raw%.githubusercontent%.com/[^/]+/[^/]+/main/") then
+        add((clean:gsub("(raw%.githubusercontent%.com/[^/]+/[^/]+)/main/", "%1/refs/heads/main/")))
+    elseif clean:find("raw%.githubusercontent%.com/[^/]+/[^/]+/master/") then
+        add((clean:gsub("(raw%.githubusercontent%.com/[^/]+/[^/]+)/master/", "%1/refs/heads/master/")))
+    end
+    return candidates
 end
 
 local function safeRequest(url, customHeaders)
@@ -649,84 +672,249 @@ local function safeRequest(url, customHeaders)
     return false, nil, "Executor does not support request() or HttpGet failed"
 end
 
-local function downloadAndPlayUrl(rawUrl, sourceName)
-    if loading or playing then return end
+local function requestWithRetry(url, customHeaders, maxAttempts, retryDelay, shouldAbort)
+    maxAttempts = maxAttempts or 3
+    retryDelay = retryDelay or 1.0
+    local lastErr = "Unknown error"
+    local lastStatus = nil
 
+    for attempt = 1, maxAttempts do
+        if shouldAbort and shouldAbort() then
+            return false, nil, "Aborted", nil
+        end
+
+        local ok, res, err = safeRequest(url, customHeaders)
+        if ok and res then
+            local status = res.StatusCode or res.status_code
+            lastStatus = status
+            if status == 200 and type(res.Body) == "string" then
+                return true, res, nil, status
+            end
+            lastErr = "HTTP " .. tostring(status)
+        else
+            lastErr = tostring(err)
+        end
+
+        if attempt < maxAttempts then
+            task.wait(retryDelay * attempt)
+        end
+    end
+
+    return false, nil, lastErr, lastStatus
+end
+
+local function fetchMidiBytesWithRetry(url, customHeaders, shouldAbort)
+    local ok, res, err, status = requestWithRetry(url, customHeaders, 3, 0.75, shouldAbort)
+    if not ok then
+        return false, nil, err, status
+    end
+    if type(res.Body) ~= "string" or not res.Body:find("MThd", 1, true) then
+        return false, nil, "Response is not a MIDI file (missing MThd)", status
+    end
+    return true, res.Body, nil, status
+end
+
+local function matchesQuery(label, query)
+    local clean = tostring(query or ""):lower():match("^%s*(.-)%s*$")
+    if clean == "" then
+        return true
+    end
+    local lowerLabel = tostring(label or ""):lower()
+    for token in clean:gmatch("%S+") do
+        if not lowerLabel:find(token, 1, true) then
+            return false
+        end
+    end
+    return true
+end
+
+local function filterSongList(sourceList, query, limit)
+    local matches = {}
+    local totalMatches = 0
+    for _, item in ipairs(sourceList) do
+        if matchesQuery(item, query) then
+            totalMatches = totalMatches + 1
+            if not limit or #matches < limit then
+                table.insert(matches, item)
+            end
+        end
+    end
+    return matches, totalMatches
+end
+
+local function setDropdownOptions(dropdown, options, fallbackText, setSuppress)
+    local display = options
+    local hasItems = #options > 0
+    if not hasItems then
+        display = {fallbackText or "No matching songs"}
+    end
+
+    if setSuppress then setSuppress(true) end
+    pcall(function()
+        dropdown:Refresh(display)
+        dropdown:Set({display[1]})
+    end)
+    if setSuppress then setSuppress(false) end
+
+    return hasItems and display[1] or nil
+end
+
+local function setLabelSafe(labelObj, text)
+    if labelObj and labelObj.Set then
+        pcall(function()
+            labelObj:Set(text)
+        end)
+    end
+end
+
+local function encodeUrlPath(str)
+    return (str:gsub("([^%w%-%._~/])", function(c)
+        return string.format("%%%02X", c:byte())
+    end))
+end
+
+local function formatArtists(artists)
+    if type(artists) == "table" then
+        return table.concat(artists, ", ")
+    elseif artists ~= nil then
+        return tostring(artists)
+    end
+    return "Unknown"
+end
+
+local function downloadAndPlayUrl(rawUrl, sourceName, silent)
     local url = normalizeMidiUrl(rawUrl)
     if not url or not url:match("^https?://") then
-        Rayfield:Notify({
-            Title = "Invalid URL",
-            Content = "Please enter or select a valid http:// or https:// .mid URL.",
-            Duration = 3,
-        })
+        if not silent then
+            Rayfield:Notify({
+                Title = "Invalid URL",
+                Content = "Please enter or select a valid http:// or https:// .mid URL.",
+                Duration = 3,
+            })
+        end
         return
     end
 
+    stopPlayback()
     loading = true
-    playbackId = playbackId + 1
     local myId = playbackId
 
     task.spawn(function()
-        local ok, res, err = safeRequest(url)
+        local ok, midiBody, err = fetchMidiBytesWithRetry(url, nil, function()
+            return playbackId ~= myId
+        end)
+
+        if playbackId ~= myId then return end
         loading = false
 
         if not ok then
-            warn("[" .. sourceName .. "] Request error:", err)
-            Rayfield:Notify({Title = "Download Failed", Content = tostring(err), Duration = 4})
+            warn("[" .. sourceName .. "] Load failed:", err, "| URL:", url)
+            if not silent then
+                Rayfield:Notify({
+                    Title = "Song Load Failed",
+                    Content = tostring(err),
+                    Duration = 4,
+                })
+            end
             return
         end
 
-        local status = res.StatusCode or res.status_code
-        if status ~= 200 then
-            warn("[" .. sourceName .. "] HTTP:", status, "| URL:", url)
-            Rayfield:Notify({Title = "HTTP Error " .. tostring(status), Content = "Check F9 console for URL details.", Duration = 4})
-            return
-        end
-
-        if type(res.Body) ~= "string" or not res.Body:find("MThd", 1, true) then
-            warn("[" .. sourceName .. "] Not a MIDI file | URL:", url)
-            Rayfield:Notify({
-                Title = "Not a MIDI File",
-                Content = "The link returned HTML/text instead of a .mid file. Use a direct raw download link.",
-                Duration = 4,
-            })
-            return
-        end
-
-        if playbackId == myId then
-            parseAndPlayMidi(res.Body, myId)
-        end
+        parseAndPlayMidi(midiBody, myId)
     end)
 end
 
--- ==========================================
--- Tab 1: Quick Picks (GitHub Repo Sync) & Direct URL
--- ==========================================
-QuickTab:CreateSection("Quick Picks (q-29/piano Repo)")
+-- Shared State Tables
+local QuickState = {
+    map = {},
+    order = {},
+    filtered = {},
+    query = "",
+    selected = nil,
+    repoUrl = QUICKPICKS_REPO_URL,
+    sourceLabel = "Built-in",
+    autoPlayOnSelect = false,
+    suppressCallback = false,
+    verifying = false,
+    fetchGeneration = 0,
+}
 
-local repoFileUrl = QUICKPICKS_REPO_URL
-local quickPickMap = {}
-local quickPickOrder = {}
-local selectedQuickPick = nil
+local LocalState = {
+    files = {},
+    order = {},
+    query = "",
+    selected = nil,
+    autoPlayOnSelect = false,
+    suppressCallback = false,
+}
 
-local function setQuickPickEntries(entries)
-    table.clear(quickPickMap)
-    table.clear(quickPickOrder)
+local NanoState = {
+    headers = {
+        ["Accept"] = "application/json, */*",
+        ["Origin"] = "https://nanomidi.net",
+        ["Referer"] = "https://nanomidi.net/",
+    },
+    apiData = {},
+    order = {},
+    query = "",
+    selected = nil,
+    loaded = false,
+    loadingList = false,
+    autoPlayOnSelect = false,
+    suppressCallback = false,
+}
+
+local GlobalState = {
+    resultsMap = {},
+    resultsOrder = {},
+    query = "",
+    selected = nil,
+    suppressCallback = false,
+}
+
+local refreshGlobalSearchResults -- forward declaration
+
+-- ==========================================
+-- Tab 1: Quick Picks (Auto-Sync + Search) & Direct URL
+-- ==========================================
+QuickTab:CreateSection("Quick Picks (Search & Auto-Sync)")
+
+local QuickStatusLabel = QuickTab:CreateLabel("Quick Picks: Loading...")
+local QuickPickDropdown -- forward declared
+
+local function applyQuickPickFilter()
+    local matches, totalMatches = filterSongList(QuickState.order, QuickState.query, MAX_DROPDOWN_ITEMS)
+    QuickState.filtered = matches
+    QuickState.selected = setDropdownOptions(
+        QuickPickDropdown,
+        matches,
+        QuickState.query ~= "" and "No matching Quick Picks" or "No songs loaded",
+        function(v) QuickState.suppressCallback = v end
+    )
+
+    if QuickState.query ~= "" then
+        setLabelSafe(QuickStatusLabel, string.format("Quick Picks (%s): %d matches (%d total)", QuickState.sourceLabel, totalMatches, #QuickState.order))
+    else
+        setLabelSafe(QuickStatusLabel, string.format("Quick Picks (%s): %d songs ready", QuickState.sourceLabel, #QuickState.order))
+    end
+end
+
+local function setQuickPickEntries(entries, sourceLabel)
+    table.clear(QuickState.map)
+    table.clear(QuickState.order)
+    QuickState.sourceLabel = sourceLabel or "Built-in"
 
     for _, item in ipairs(entries) do
         local label = tostring(item.name or "Untitled")
-        if quickPickMap[label] then
-            label = label .. " (" .. tostring(#quickPickOrder + 1) .. ")"
+        if QuickState.map[label] then
+            label = label .. " (" .. tostring(#QuickState.order + 1) .. ")"
         end
-        quickPickMap[label] = normalizeMidiUrl(item.url)
-        table.insert(quickPickOrder, label)
+        QuickState.map[label] = normalizeMidiUrl(item.url)
+        table.insert(QuickState.order, label)
     end
 
-    if #quickPickOrder == 0 then
-        table.insert(quickPickOrder, "No songs loaded")
-        selectedQuickPick = nil
-    else
-        selectedQuickPick = quickPickOrder[1]
+    applyQuickPickFilter()
+    if refreshGlobalSearchResults then
+        refreshGlobalSearchResults()
     end
 end
 
@@ -766,87 +954,182 @@ local function parseQuickPickFile(body)
     return list
 end
 
-setQuickPickEntries(DEFAULT_QUICKPICKS)
+local function playQuickPickSelection(label)
+    local url = label and QuickState.map[label]
+    if not url then
+        Rayfield:Notify({Title = "No Song Selected", Content = "Pick a song from the dropdown first.", Duration = 3})
+        return
+    end
+    downloadAndPlayUrl(url, "QuickPick", false)
+end
 
-local QuickPickDropdown = QuickTab:CreateDropdown({
+local QuickSearchInput = QuickTab:CreateInput({
+    Name = "🔍 Search Quick Picks",
+    CurrentValue = "",
+    PlaceholderText = "Type song/artist & press Enter (blank = all)",
+    RemoveTextAfterFocusLost = false,
+    Flag = "QuickSearchInput",
+    Callback = function(Text)
+        QuickState.query = tostring(Text or "")
+        applyQuickPickFilter()
+    end,
+})
+
+QuickPickDropdown = QuickTab:CreateDropdown({
     Name = "Select Quick Pick",
-    Options = quickPickOrder,
-    CurrentOption = {quickPickOrder[1]},
+    Options = {"Loading..."},
+    CurrentOption = {"Loading..."},
     MultipleOptions = false,
     Flag = "QuickPickSelect",
     Callback = function(Option)
-        selectedQuickPick = type(Option) == "table" and Option[1] or Option
+        local chosen = type(Option) == "table" and Option[1] or Option
+        QuickState.selected = QuickState.map[chosen] and chosen or nil
+        if not QuickState.suppressCallback and QuickState.autoPlayOnSelect and QuickState.selected then
+            playQuickPickSelection(QuickState.selected)
+        end
+    end,
+})
+
+setQuickPickEntries(DEFAULT_QUICKPICKS, "Built-in")
+
+QuickTab:CreateToggle({
+    Name = "⚡ Auto-Play Song on Select",
+    CurrentValue = false,
+    Flag = "QuickAutoPlayToggle",
+    Callback = function(Value)
+        QuickState.autoPlayOnSelect = Value
     end,
 })
 
 QuickTab:CreateButton({
     Name = "▶️ Play Quick Pick",
     Callback = function()
-        local url = selectedQuickPick and quickPickMap[selectedQuickPick]
-        if not url then
-            Rayfield:Notify({Title = "No Song Selected", Content = "Pick a song from the dropdown first.", Duration = 3})
-            return
-        end
-        downloadAndPlayUrl(url, "QuickPick")
+        playQuickPickSelection(QuickState.selected)
     end,
 })
 
+QuickTab:CreateButton({
+    Name = "⚡ Auto-Try Matching Quick Picks",
+    Callback = function()
+        local candidates = {}
+        for _, label in ipairs(QuickState.order) do
+            if matchesQuery(label, QuickState.query) and QuickState.map[label] then
+                table.insert(candidates, {label = label, url = QuickState.map[label]})
+            end
+        end
+        if #candidates == 0 then
+            Rayfield:Notify({Title = "No Matches", Content = "No Quick Picks matched your search.", Duration = 3})
+            return
+        end
+
+        stopPlayback()
+        loading = true
+        local myId = playbackId
+
+        task.spawn(function()
+            for idx, entry in ipairs(candidates) do
+                if playbackId ~= myId then return end
+                setLabelSafe(QuickStatusLabel, string.format("Auto-trying (%d/%d): %s", idx, #candidates, entry.label))
+                local ok, midiBody = fetchMidiBytesWithRetry(entry.url, nil, function()
+                    return playbackId ~= myId
+                end)
+                if playbackId ~= myId then return end
+                if ok and midiBody then
+                    loading = false
+                    setLabelSafe(QuickStatusLabel, "Playing: " .. entry.label)
+                    Rayfield:Notify({Title = "Loaded & Playing", Content = entry.label, Duration = 3})
+                    parseAndPlayMidi(midiBody, myId)
+                    return
+                end
+            end
+
+            if playbackId == myId then
+                loading = false
+                applyQuickPickFilter()
+                Rayfield:Notify({Title = "Auto-Try Failed", Content = "None of the matching Quick Picks returned valid MIDI data.", Duration = 4})
+            end
+        end)
+    end,
+})
+
+QuickTab:CreateButton({
+    Name = "🔄 Clear Search",
+    Callback = function()
+        QuickState.query = ""
+        pcall(function() QuickSearchInput:Set("") end)
+        applyQuickPickFilter()
+    end,
+})
+
+QuickTab:CreateSection("GitHub Repo Sync (Auto-Retry)")
+
 local function fetchFromRepoUrl(urlToFetch, silent)
-    local cleanUrl = normalizeMidiUrl(urlToFetch)
-    if cleanUrl == "" then
-        setQuickPickEntries(DEFAULT_QUICKPICKS)
-        QuickPickDropdown:Refresh(quickPickOrder)
+    local candidates = buildRepoUrlCandidates(urlToFetch)
+    if #candidates == 0 then
+        setQuickPickEntries(DEFAULT_QUICKPICKS, "Built-in")
         if not silent then
             Rayfield:Notify({
                 Title = "Built-in Quick Picks",
-                Content = string.format("Loaded %d built-in songs.", #quickPickOrder),
+                Content = string.format("Loaded %d built-in songs.", #QuickState.order),
                 Duration = 3,
             })
         end
         return
     end
 
+    QuickState.fetchGeneration = QuickState.fetchGeneration + 1
+    local myGen = QuickState.fetchGeneration
+    setLabelSafe(QuickStatusLabel, "Quick Picks: Auto-loading repo...")
+
     task.spawn(function()
-        local sep = cleanUrl:find("?", 1, true) and "&" or "?"
-        local fetchUrl = cleanUrl .. sep .. "t=" .. tostring(os.time())
+        local lastErr = "Failed to fetch repo"
+        for round = 1, 3 do
+            if QuickState.fetchGeneration ~= myGen then return end
 
-        local ok, res, err = safeRequest(fetchUrl)
-        if not ok then
-            warn("[Repo Fetch] Error:", err)
-            if not silent then
-                Rayfield:Notify({Title = "Repo Fetch Failed", Content = tostring(err), Duration = 4})
+            for _, candidate in ipairs(candidates) do
+                if QuickState.fetchGeneration ~= myGen then return end
+                local sep = candidate:find("?", 1, true) and "&" or "?"
+                local fetchUrl = candidate .. sep .. "t=" .. tostring(os.time())
+
+                local ok, res, err = safeRequest(fetchUrl)
+                if ok and res then
+                    local status = res.StatusCode or res.status_code
+                    if status == 200 and type(res.Body) == "string" then
+                        local parsed = parseQuickPickFile(res.Body)
+                        if #parsed > 0 then
+                            if QuickState.fetchGeneration ~= myGen then return end
+                            setQuickPickEntries(parsed, "GitHub Repo")
+                            Rayfield:Notify({
+                                Title = "Repo Songs Auto-Loaded",
+                                Content = string.format("Loaded %d songs from GitHub!", #QuickState.order),
+                                Duration = 3,
+                            })
+                            return
+                        else
+                            lastErr = "Empty or invalid song JSON/list"
+                        end
+                    else
+                        lastErr = "HTTP " .. tostring(status)
+                    end
+                else
+                    lastErr = tostring(err)
+                end
             end
-            return
+
+            if round < 3 then
+                setLabelSafe(QuickStatusLabel, string.format("Quick Picks: Retrying repo (%d/3)...", round + 1))
+                task.wait(1.5 * round)
+            end
         end
 
-        local status = res.StatusCode or res.status_code
-        if status ~= 200 or type(res.Body) ~= "string" then
-            warn("[Repo Fetch] HTTP:", status)
-            if not silent then
-                Rayfield:Notify({Title = "Repo Fetch Failed", Content = "HTTP " .. tostring(status), Duration = 4})
-            end
-            return
-        end
-
-        local parsed = parseQuickPickFile(res.Body)
-        if #parsed == 0 then
-            if not silent then
-                Rayfield:Notify({
-                    Title = "Empty / Invalid File",
-                    Content = "Expected JSON ([{\"name\":...,\"url\":...}]) or 'Name | URL' lines.",
-                    Duration = 4,
-                })
-            end
-            return
-        end
-
-        setQuickPickEntries(parsed)
-        QuickPickDropdown:Refresh(quickPickOrder)
+        if QuickState.fetchGeneration ~= myGen then return end
+        warn("[Repo Auto-Load] Failed after retries:", lastErr)
+        applyQuickPickFilter()
         if not silent then
             Rayfield:Notify({
-                Title = "Repo Songs Loaded",
-                Content = string.format("Loaded %d songs from your GitHub file!", #quickPickOrder),
-                Duration = 3,
+                Title = "Repo Load Failed (Using Fallback)",
+                Content = tostring(lastErr),
+                Duration = 4,
             })
         end
     end)
@@ -857,32 +1140,35 @@ if QUICKPICKS_REPO_URL ~= "" then
 end
 
 QuickTab:CreateInput({
-    Name = "GitHub Repo File URL (songs.json / songs.txt)",
+    Name = "GitHub Repo File URL (Auto-Loads)",
     CurrentValue = QUICKPICKS_REPO_URL,
     PlaceholderText = "https://raw.githubusercontent.com/q-29/piano/refs/heads/main/songs.json",
     RemoveTextAfterFocusLost = false,
     Flag = "RepoFileUrl",
     Callback = function(Text)
-        repoFileUrl = Text
+        local cleaned = tostring(Text or ""):match("^%s*(.-)%s*$")
+        if cleaned ~= QuickState.repoUrl then
+            QuickState.repoUrl = cleaned
+            fetchFromRepoUrl(cleaned, false)
+        end
     end,
 })
 
 QuickTab:CreateButton({
     Name = "🔄 Fetch Songs from Repo",
     Callback = function()
-        fetchFromRepoUrl(repoFileUrl, false)
+        fetchFromRepoUrl(QuickState.repoUrl, false)
     end,
 })
 
-local verifyingLinks = false
 QuickTab:CreateButton({
     Name = "🔍 Verify All Links (Check in F9)",
     Callback = function()
-        if verifyingLinks then return end
-        verifyingLinks = true
+        if QuickState.verifying then return end
+        QuickState.verifying = true
 
         task.spawn(function()
-            local total = #quickPickOrder
+            local total = #QuickState.order
             local passed = 0
             local failedCount = 0
             local index = 0
@@ -901,8 +1187,8 @@ QuickTab:CreateButton({
                         local i = index
                         if i > total then break end
 
-                        local label = quickPickOrder[i]
-                        local url = quickPickMap[label]
+                        local label = QuickState.order[i]
+                        local url = QuickState.map[label]
                         if url then
                             local ok, res, err = safeRequest(url)
                             local status = ok and res and (res.StatusCode or res.status_code) or nil
@@ -925,7 +1211,7 @@ QuickTab:CreateButton({
                 task.wait(0.1)
             end
 
-            verifyingLinks = false
+            QuickState.verifying = false
             print(string.format("[QuickPicks Verify] Passed: %d / %d | Failed: %d", passed, total, failedCount))
             Rayfield:Notify({
                 Title = "Link Verification Done",
@@ -954,7 +1240,7 @@ QuickTab:CreateInput({
 QuickTab:CreateButton({
     Name = "▶️ Download & Play URL",
     Callback = function()
-        downloadAndPlayUrl(customMidiUrl, "Direct URL")
+        downloadAndPlayUrl(customMidiUrl, "Direct URL", false)
     end,
 })
 
@@ -982,18 +1268,19 @@ QuickTab:CreateButton({
 -- ==========================================
 LocalTab:CreateSection("Local .mid Files (Workspace)")
 
-local localFiles = {}
-local selectedLocalFile = nil
+local LocalStatusLabel = LocalTab:CreateLabel("Local MIDI: Scanning...")
+local LocalDropdown -- forward declared
 
 local function scanLocalMidiFiles()
-    table.clear(localFiles)
+    table.clear(LocalState.files)
+    table.clear(LocalState.order)
+
     if not listfiles or not readfile then
-        return {"Executor lacks listfiles/readfile"}
+        setLabelSafe(LocalStatusLabel, "Local MIDI: Executor lacks listfiles/readfile")
+        return
     end
 
-    local results = {}
     local seen = {}
-
     local function tryScan(folder)
         local ok, files = pcall(listfiles, folder)
         if not ok or type(files) ~= "table" then return end
@@ -1002,8 +1289,12 @@ local function scanLocalMidiFiles()
                 local name = path:match("([^/\\]+)$") or path
                 if not seen[path] then
                     seen[path] = true
-                    localFiles[name] = path
-                    table.insert(results, name)
+                    local label = name
+                    if LocalState.files[label] then
+                        label = label .. " (" .. tostring(#LocalState.order + 1) .. ")"
+                    end
+                    LocalState.files[label] = path
+                    table.insert(LocalState.order, label)
                 end
             end
         end
@@ -1014,46 +1305,99 @@ local function scanLocalMidiFiles()
     end
     tryScan("")
 
-    if #results == 0 then
-        return {"No .mid files in workspace"}
-    end
-    return results
+    table.sort(LocalState.order)
 end
 
-local LocalDropdown = LocalTab:CreateDropdown({
+local function applyLocalFilter()
+    local matches, totalMatches = filterSongList(LocalState.order, LocalState.query, MAX_DROPDOWN_ITEMS)
+    local fallback = #LocalState.order == 0 and "No .mid files in workspace" or "No matching local files"
+    LocalState.selected = setDropdownOptions(
+        LocalDropdown,
+        matches,
+        fallback,
+        function(v) LocalState.suppressCallback = v end
+    )
+
+    if LocalState.query ~= "" then
+        setLabelSafe(LocalStatusLabel, string.format("Local MIDI: %d matches (%d total)", totalMatches, #LocalState.order))
+    else
+        setLabelSafe(LocalStatusLabel, string.format("Local MIDI: %d files found", #LocalState.order))
+    end
+end
+
+local function playLocalSelection(label)
+    local path = label and LocalState.files[label]
+    if not path or not readfile then
+        Rayfield:Notify({Title = "No Local File", Content = "Select a valid .mid file first.", Duration = 3})
+        return
+    end
+
+    local ok, content = pcall(readfile, path)
+    if not ok or type(content) ~= "string" then
+        warn("[Local MIDI] Failed to read file:", tostring(content))
+        Rayfield:Notify({Title = "Read Failed", Content = tostring(content), Duration = 3})
+        return
+    end
+
+    stopPlayback()
+    local myId = playbackId
+    task.spawn(parseAndPlayMidi, content, myId)
+end
+
+LocalTab:CreateInput({
+    Name = "🔍 Search Local .mid Files",
+    CurrentValue = "",
+    PlaceholderText = "Type filename & press Enter (blank = all)",
+    RemoveTextAfterFocusLost = false,
+    Flag = "LocalSearchInput",
+    Callback = function(Text)
+        LocalState.query = tostring(Text or "")
+        applyLocalFilter()
+    end,
+})
+
+LocalDropdown = LocalTab:CreateDropdown({
     Name = "Select Local .mid",
-    Options = scanLocalMidiFiles(),
-    CurrentOption = {"Select a file"},
+    Options = {"Scanning..."},
+    CurrentOption = {"Scanning..."},
     MultipleOptions = false,
     Flag = "LocalMidiSelect",
     Callback = function(Option)
-        selectedLocalFile = type(Option) == "table" and Option[1] or Option
+        local chosen = type(Option) == "table" and Option[1] or Option
+        LocalState.selected = LocalState.files[chosen] and chosen or nil
+        if not LocalState.suppressCallback and LocalState.autoPlayOnSelect and LocalState.selected then
+            playLocalSelection(LocalState.selected)
+        end
+    end,
+})
+
+scanLocalMidiFiles()
+applyLocalFilter()
+
+LocalTab:CreateToggle({
+    Name = "⚡ Auto-Play File on Select",
+    CurrentValue = false,
+    Flag = "LocalAutoPlayToggle",
+    Callback = function(Value)
+        LocalState.autoPlayOnSelect = Value
     end,
 })
 
 LocalTab:CreateButton({
     Name = "🔄 Refresh Local .mid Files",
     Callback = function()
-        LocalDropdown:Refresh(scanLocalMidiFiles())
+        scanLocalMidiFiles()
+        applyLocalFilter()
+        if refreshGlobalSearchResults then
+            refreshGlobalSearchResults()
+        end
     end,
 })
 
 LocalTab:CreateButton({
     Name = "▶️ Play Local MIDI",
     Callback = function()
-        if loading or playing then return end
-        local path = selectedLocalFile and localFiles[selectedLocalFile]
-        if not path or not readfile then return end
-
-        local ok, content = pcall(readfile, path)
-        if not ok or type(content) ~= "string" then
-            warn("[Local MIDI] Failed to read file:", tostring(content))
-            return
-        end
-
-        playbackId = playbackId + 1
-        local myId = playbackId
-        task.spawn(parseAndPlayMidi, content, myId)
+        playLocalSelection(LocalState.selected)
     end,
 })
 
@@ -1088,8 +1432,8 @@ LocalTab:CreateSlider({
 LocalTab:CreateButton({
     Name = "▶️ Play Pasted Sheet",
     Callback = function()
-        if loading or playing or pastedSheet == "" then return end
-        playbackId = playbackId + 1
+        if pastedSheet == "" then return end
+        stopPlayback()
         local myId = playbackId
         task.spawn(playTextSheet, pastedSheet, sheetBpm, myId)
     end,
@@ -1101,125 +1445,404 @@ LocalTab:CreateButton({
 })
 
 -- ==========================================
--- Tab 3: NanoMIDI API
+-- Tab 3: NanoMIDI API (Search + Auto-Retry)
 -- ==========================================
-local nanoHeaders = {
-    ["Accept"] = "application/json, */*",
-    ["Origin"] = "https://nanomidi.net",
-    ["Referer"] = "https://nanomidi.net/",
-}
+NanoTab:CreateSection("NanoMIDI Library")
 
-local apiData = {}
-local songNames = {}
+local NanoStatusLabel = NanoTab:CreateLabel("NanoMIDI: Auto-loading...")
+local NanoDropdown -- forward declared
 
-local function formatArtists(artists)
-    if type(artists) == "table" then
-        return table.concat(artists, ", ")
-    elseif artists ~= nil then
-        return tostring(artists)
+local function applyNanoFilter()
+    if not NanoState.loaded and #NanoState.order == 0 then
+        return
     end
-    return "Unknown"
+    local matches, totalMatches = filterSongList(NanoState.order, NanoState.query, MAX_DROPDOWN_ITEMS)
+    NanoState.selected = setDropdownOptions(
+        NanoDropdown,
+        matches,
+        NanoState.query ~= "" and "No matching NanoMIDI songs" or "No songs found",
+        function(v) NanoState.suppressCallback = v end
+    )
+
+    if NanoState.query ~= "" then
+        local shownText = totalMatches > #matches and string.format("showing %d of %d matches", #matches, totalMatches) or string.format("%d matches", totalMatches)
+        setLabelSafe(NanoStatusLabel, string.format("NanoMIDI: %s (%d total)", shownText, #NanoState.order))
+    else
+        local shownText = #NanoState.order > #matches and string.format("showing top %d of %d (use search)", #matches, #NanoState.order) or string.format("%d songs ready", #NanoState.order)
+        setLabelSafe(NanoStatusLabel, "NanoMIDI: " .. shownText)
+    end
 end
 
-local function encodeUrlPath(str)
-    return (str:gsub("([^%w%-%._~/])", function(c)
-        return string.format("%%%02X", c:byte())
-    end))
-end
-
-local function loadMidiData()
-    table.clear(apiData)
-    table.clear(songNames)
-
-    local ok, res, err = safeRequest("https://api.nanomidi.net/api/midiData", nanoHeaders)
-    if not ok then
-        warn("[NanoMIDI] Request error:", err)
-        return {"Request Error: " .. tostring(err)}
-    end
-
-    local status = res.StatusCode or res.status_code
-    if status ~= 200 then
-        return {"Failed to load API (HTTP " .. tostring(status) .. ")"}
-    end
-
-    local decodeOk, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
-    if not decodeOk or type(data) ~= "table" then
-        return {"Invalid API JSON response"}
-    end
-
-    for _, song in ipairs(data) do
-        local label = tostring(song.name or "Untitled") .. " - " .. formatArtists(song.artists)
-        if apiData[label] then
-            label = label .. " (" .. tostring(song.midiFilename or #songNames + 1) .. ")"
+local function playNanoSelection(label, silent)
+    local song = label and NanoState.apiData[label]
+    if not song or not song.midiFilename then
+        if not silent then
+            Rayfield:Notify({Title = "No Song Selected", Content = "Select a NanoMIDI song first.", Duration = 3})
         end
-        table.insert(songNames, label)
-        apiData[label] = song
+        return
     end
 
-    if #songNames == 0 then
-        return {"No songs found"}
-    end
-    return songNames
+    stopPlayback()
+    loading = true
+    local myId = playbackId
+
+    task.spawn(function()
+        local url = "https://api.nanomidi.net/api/midis/" .. encodeUrlPath(tostring(song.midiFilename))
+        local ok, midiBody, err = fetchMidiBytesWithRetry(url, NanoState.headers, function()
+            return playbackId ~= myId
+        end)
+
+        if playbackId ~= myId then return end
+        loading = false
+
+        if ok and midiBody then
+            parseAndPlayMidi(midiBody, myId)
+        else
+            warn("[NanoMIDI] Download failed:", err)
+            if not silent then
+                Rayfield:Notify({Title = "NanoMIDI Load Failed", Content = tostring(err), Duration = 4})
+            end
+        end
+    end)
 end
 
-local selectedSong = nil
-local NanoDropdown = NanoTab:CreateDropdown({
+local function refreshNanoSongs(silent)
+    if NanoState.loadingList then return end
+    NanoState.loadingList = true
+    setLabelSafe(NanoStatusLabel, "NanoMIDI: Auto-loading songs...")
+
+    task.spawn(function()
+        local ok, res, err = requestWithRetry("https://api.nanomidi.net/api/midiData", NanoState.headers, 3, 1.2)
+        if not ok then
+            NanoState.loadingList = false
+            warn("[NanoMIDI] Auto-load failed:", err)
+            setLabelSafe(NanoStatusLabel, "NanoMIDI: Load failed (click Refresh)")
+            if #NanoState.order == 0 then
+                setDropdownOptions(NanoDropdown, {}, "Failed to load NanoMIDI (" .. tostring(err) .. ")", function(v)
+                    NanoState.suppressCallback = v
+                end)
+            end
+            if not silent then
+                Rayfield:Notify({Title = "NanoMIDI Load Failed", Content = tostring(err), Duration = 4})
+            end
+            return
+        end
+
+        local decodeOk, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+        if not decodeOk or type(data) ~= "table" then
+            NanoState.loadingList = false
+            setLabelSafe(NanoStatusLabel, "NanoMIDI: Invalid API JSON")
+            return
+        end
+
+        table.clear(NanoState.apiData)
+        table.clear(NanoState.order)
+
+        for _, song in ipairs(data) do
+            local label = tostring(song.name or "Untitled") .. " - " .. formatArtists(song.artists)
+            if NanoState.apiData[label] then
+                label = label .. " (" .. tostring(song.midiFilename or #NanoState.order + 1) .. ")"
+            end
+            table.insert(NanoState.order, label)
+            NanoState.apiData[label] = song
+        end
+
+        NanoState.loaded = true
+        NanoState.loadingList = false
+        applyNanoFilter()
+        if refreshGlobalSearchResults then
+            refreshGlobalSearchResults()
+        end
+    end)
+end
+
+local NanoSearchInput = NanoTab:CreateInput({
+    Name = "🔍 Search NanoMIDI",
+    CurrentValue = "",
+    PlaceholderText = "Search title/artist & press Enter",
+    RemoveTextAfterFocusLost = false,
+    Flag = "NanoSearchInput",
+    Callback = function(Text)
+        NanoState.query = tostring(Text or "")
+        if not NanoState.loaded and not NanoState.loadingList then
+            refreshNanoSongs(true)
+        end
+        applyNanoFilter()
+    end,
+})
+
+NanoDropdown = NanoTab:CreateDropdown({
     Name = "Select Song",
     Options = {"Fetching..."},
     CurrentOption = {"Fetching..."},
     MultipleOptions = false,
     Flag = "NanoSongSelect",
     Callback = function(Option)
-        selectedSong = type(Option) == "table" and Option[1] or Option
+        local chosen = type(Option) == "table" and Option[1] or Option
+        NanoState.selected = NanoState.apiData[chosen] and chosen or nil
+        if not NanoState.suppressCallback and NanoState.autoPlayOnSelect and NanoState.selected then
+            playNanoSelection(NanoState.selected, false)
+        end
     end,
 })
 
-local function refreshSongs()
-    task.spawn(function()
-        local names = loadMidiData()
-        NanoDropdown:Refresh(names)
-    end)
-end
+refreshNanoSongs(true)
 
-refreshSongs()
+NanoTab:CreateToggle({
+    Name = "⚡ Auto-Play Song on Select",
+    CurrentValue = false,
+    Flag = "NanoAutoPlayToggle",
+    Callback = function(Value)
+        NanoState.autoPlayOnSelect = Value
+    end,
+})
 
 NanoTab:CreateButton({
     Name = "🔄 Refresh Song List",
-    Callback = refreshSongs,
+    Callback = function()
+        refreshNanoSongs(false)
+    end,
+})
+
+NanoTab:CreateButton({
+    Name = "🔄 Clear Search",
+    Callback = function()
+        NanoState.query = ""
+        pcall(function() NanoSearchInput:Set("") end)
+        applyNanoFilter()
+    end,
 })
 
 NanoTab:CreateButton({
     Name = "▶️ Download & Play",
     Callback = function()
-        if loading or playing then return end
-        local song = selectedSong and apiData[selectedSong]
-        if not song or not song.midiFilename then return end
+        playNanoSelection(NanoState.selected, false)
+    end,
+})
 
+NanoTab:CreateButton({
+    Name = "⏹️ Stop",
+    Callback = stopPlayback,
+})
+
+-- ==========================================
+-- Tab 4: Global Search & Auto-Try Across All Sources
+-- ==========================================
+GlobalTab:CreateSection("Search All Sources (Local + Quick Picks + NanoMIDI)")
+
+local GlobalStatusLabel = GlobalTab:CreateLabel("Global Search: Enter a song name to search all sources")
+local GlobalDropdown -- forward declared
+
+local function buildGlobalMatches(query)
+    local allEntries = {}
+    local displayNames = {}
+    local seenKeys = {}
+
+    local function addEntry(sourceTag, label, entry)
+        if not matchesQuery(label, query) then return end
+        local display = "[" .. sourceTag .. "] " .. label
+        if seenKeys[display] then
+            display = display .. " #" .. tostring(#displayNames + 1)
+        end
+        seenKeys[display] = true
+        entry.display = display
+        allEntries[display] = entry
+        table.insert(displayNames, display)
+    end
+
+    for _, label in ipairs(LocalState.order) do
+        addEntry("Local", label, {kind = "local", label = label, path = LocalState.files[label]})
+        if #displayNames >= MAX_DROPDOWN_ITEMS then break end
+    end
+
+    if #displayNames < MAX_DROPDOWN_ITEMS then
+        for _, label in ipairs(QuickState.order) do
+            addEntry("QuickPick", label, {kind = "url", label = label, url = QuickState.map[label]})
+            if #displayNames >= MAX_DROPDOWN_ITEMS then break end
+        end
+    end
+
+    if #displayNames < MAX_DROPDOWN_ITEMS then
+        for _, label in ipairs(NanoState.order) do
+            local song = NanoState.apiData[label]
+            if song and song.midiFilename then
+                addEntry("NanoMIDI", label, {
+                    kind = "nano",
+                    label = label,
+                    url = "https://api.nanomidi.net/api/midis/" .. encodeUrlPath(tostring(song.midiFilename)),
+                })
+            end
+            if #displayNames >= MAX_DROPDOWN_ITEMS then break end
+        end
+    end
+
+    return allEntries, displayNames
+end
+
+refreshGlobalSearchResults = function()
+    local map, names = buildGlobalMatches(GlobalState.query)
+    GlobalState.resultsMap = map
+    GlobalState.resultsOrder = names
+    GlobalState.selected = setDropdownOptions(
+        GlobalDropdown,
+        names,
+        GlobalState.query ~= "" and "No matches across sources" or "No songs loaded yet",
+        function(v) GlobalState.suppressCallback = v end
+    )
+
+    if GlobalState.query ~= "" then
+        setLabelSafe(GlobalStatusLabel, string.format("Global Search: %d matches found", #names))
+    else
+        setLabelSafe(GlobalStatusLabel, string.format("Global Search: Showing %d songs (Local %d | Quick %d | Nano %d)", #names, #LocalState.order, #QuickState.order, #NanoState.order))
+    end
+end
+
+local function tryLoadGlobalEntry(entry, myId)
+    if entry.kind == "local" then
+        if not entry.path or not readfile then return false, nil end
+        local ok, content = pcall(readfile, entry.path)
+        if ok and type(content) == "string" and content:find("MThd", 1, true) then
+            return true, content
+        end
+        return false, nil
+    elseif entry.kind == "nano" then
+        local ok, midiBody = fetchMidiBytesWithRetry(entry.url, NanoState.headers, function()
+            return playbackId ~= myId
+        end)
+        return ok, midiBody
+    else
+        local ok, midiBody = fetchMidiBytesWithRetry(entry.url, nil, function()
+            return playbackId ~= myId
+        end)
+        return ok, midiBody
+    end
+end
+
+local GlobalSearchInput = GlobalTab:CreateInput({
+    Name = "🔍 Search All Songs",
+    CurrentValue = "",
+    PlaceholderText = "e.g. unravel, megalovania, chopin (press Enter)",
+    RemoveTextAfterFocusLost = false,
+    Flag = "GlobalSearchInput",
+    Callback = function(Text)
+        GlobalState.query = tostring(Text or "")
+        if not NanoState.loaded and not NanoState.loadingList then
+            refreshNanoSongs(true)
+        end
+        refreshGlobalSearchResults()
+    end,
+})
+
+GlobalDropdown = GlobalTab:CreateDropdown({
+    Name = "Matching Songs",
+    Options = {"Loading..."},
+    CurrentOption = {"Loading..."},
+    MultipleOptions = false,
+    Flag = "GlobalSongSelect",
+    Callback = function(Option)
+        local chosen = type(Option) == "table" and Option[1] or Option
+        GlobalState.selected = GlobalState.resultsMap[chosen] and chosen or nil
+    end,
+})
+
+refreshGlobalSearchResults()
+
+GlobalTab:CreateButton({
+    Name = "▶️ Play Selected Match",
+    Callback = function()
+        local entry = GlobalState.selected and GlobalState.resultsMap[GlobalState.selected]
+        if not entry then
+            Rayfield:Notify({Title = "No Song Selected", Content = "Search and select a song first.", Duration = 3})
+            return
+        end
+
+        stopPlayback()
         loading = true
-        playbackId = playbackId + 1
         local myId = playbackId
 
         task.spawn(function()
-            local url = "https://api.nanomidi.net/api/midis/" .. encodeUrlPath(tostring(song.midiFilename))
-            local ok, res, err = safeRequest(url, nanoHeaders)
+            setLabelSafe(GlobalStatusLabel, "Loading: " .. entry.display)
+            local ok, midiBody = tryLoadGlobalEntry(entry, myId)
+            if playbackId ~= myId then return end
             loading = false
 
-            if not ok then
-                warn("[NanoMIDI] Download error:", err)
-                return
-            end
-
-            local status = res.StatusCode or res.status_code
-            if status == 200 and playbackId == myId then
-                parseAndPlayMidi(res.Body, myId)
+            if ok and midiBody then
+                setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
+                parseAndPlayMidi(midiBody, myId)
             else
-                warn("[NanoMIDI] Download failed HTTP:", status)
+                setLabelSafe(GlobalStatusLabel, "Failed: " .. entry.display)
+                Rayfield:Notify({Title = "Song Load Failed", Content = "Try 'Auto-Try Matching Songs' to test other sources.", Duration = 4})
             end
         end)
     end,
 })
 
-NanoTab:CreateButton({
+GlobalTab:CreateButton({
+    Name = "⚡ Auto-Try Matching Songs (Find Working)",
+    Callback = function()
+        if #GlobalState.resultsOrder == 0 then
+            Rayfield:Notify({Title = "No Matches", Content = "No songs matched your search.", Duration = 3})
+            return
+        end
+
+        local queue = {}
+        for _, display in ipairs(GlobalState.resultsOrder) do
+            local entry = GlobalState.resultsMap[display]
+            if entry then
+                table.insert(queue, entry)
+            end
+        end
+
+        stopPlayback()
+        loading = true
+        local myId = playbackId
+
+        task.spawn(function()
+            for idx, entry in ipairs(queue) do
+                if playbackId ~= myId then return end
+                setLabelSafe(GlobalStatusLabel, string.format("Auto-trying (%d/%d): %s", idx, #queue, entry.display))
+                local ok, midiBody = tryLoadGlobalEntry(entry, myId)
+                if playbackId ~= myId then return end
+
+                if ok and midiBody then
+                    loading = false
+                    setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
+                    Rayfield:Notify({Title = "Auto-Loaded & Playing", Content = entry.display, Duration = 3})
+                    parseAndPlayMidi(midiBody, myId)
+                    return
+                end
+            end
+
+            if playbackId == myId then
+                loading = false
+                setLabelSafe(GlobalStatusLabel, "Auto-try finished: no working MIDI found")
+                Rayfield:Notify({Title = "Auto-Try Failed", Content = "None of the matching entries returned valid MIDI.", Duration = 4})
+            end
+        end)
+    end,
+})
+
+GlobalTab:CreateButton({
+    Name = "🔄 Reload All Song Sources",
+    Callback = function()
+        scanLocalMidiFiles()
+        applyLocalFilter()
+        fetchFromRepoUrl(QuickState.repoUrl, false)
+        refreshNanoSongs(false)
+        refreshGlobalSearchResults()
+    end,
+})
+
+GlobalTab:CreateButton({
+    Name = "🔄 Clear Search",
+    Callback = function()
+        GlobalState.query = ""
+        pcall(function() GlobalSearchInput:Set("") end)
+        refreshGlobalSearchResults()
+    end,
+})
+
+GlobalTab:CreateButton({
     Name = "⏹️ Stop",
     Callback = stopPlayback,
 })
