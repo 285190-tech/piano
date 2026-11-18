@@ -2,6 +2,10 @@ local QUICKPICKS_REPO_URL = "https://raw.githubusercontent.com/q-29/piano/refs/h
 
 local HttpService = game:GetService("HttpService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
 
 -- ==========================================
 -- Built-in Fallback Quick Picks (Validated)
@@ -407,12 +411,59 @@ local function playChar(char)
 end
 
 -- ==========================================
--- Playback State & Players
+-- ==========================================
+-- Playback State, Progress HUD State & Players
 -- ==========================================
 local currentPlaybackSpeed = 1
 local playing = false
 local playbackId = 0
 local stopHooks = {}
+
+local PlayerHudState = {
+    enabled = true,
+    title = "No song playing",
+    subtitle = "Select a song to start",
+    currentTime = 0,
+    totalTime = 0,
+    status = "idle", -- "idle" | "loading" | "playing" | "paused" | "stopped" | "finished"
+    paused = false,
+    seekTarget = nil,
+    draggingBar = false,
+    dragPreviewTime = 0,
+    replayFn = nil,
+}
+
+local function formatDuration(seconds)
+    local sec = math.max(0, math.floor((tonumber(seconds) or 0) + 0.0001))
+    if sec >= 3600 then
+        local h = math.floor(sec / 3600)
+        local m = math.floor((sec % 3600) / 60)
+        local s = sec % 60
+        return string.format("%d:%02d:%02d", h, m, s)
+    end
+    local m = math.floor(sec / 60)
+    local s = sec % 60
+    return string.format("%d:%02d", m, s)
+end
+
+local function setHudLoading(title, subtitle)
+    PlayerHudState.title = tostring(title or "Loading song...")
+    PlayerHudState.subtitle = tostring(subtitle or "Loading...")
+    PlayerHudState.currentTime = 0
+    PlayerHudState.totalTime = 0
+    PlayerHudState.status = "loading"
+    PlayerHudState.paused = false
+    PlayerHudState.seekTarget = nil
+end
+
+local function setHudFailed(reason)
+    PlayerHudState.status = "idle"
+    PlayerHudState.paused = false
+    PlayerHudState.currentTime = 0
+    PlayerHudState.totalTime = 0
+    PlayerHudState.subtitle = tostring(reason or "Load failed")
+    PlayerHudState.replayFn = nil
+end
 
 local function registerStopHook(fn)
     table.insert(stopHooks, fn)
@@ -433,19 +484,59 @@ end
 local function stopPlayback()
     playbackId = playbackId + 1
     playing = false
+    PlayerHudState.paused = false
+    PlayerHudState.seekTarget = nil
+    PlayerHudState.currentTime = 0
+    if PlayerHudState.replayFn then
+        PlayerHudState.status = "stopped"
+    else
+        PlayerHudState.status = "idle"
+    end
     releaseHeldKeys()
     for _, hook in ipairs(stopHooks) do
         pcall(hook)
     end
 end
 
-local function parseAndPlayMidi(midiString, myId, onStart)
+local function togglePausePlayback()
+    if playing then
+        PlayerHudState.paused = not PlayerHudState.paused
+        if PlayerHudState.paused then
+            PlayerHudState.status = "paused"
+            releaseHeldKeys()
+        else
+            PlayerHudState.status = "playing"
+        end
+    elseif PlayerHudState.replayFn then
+        PlayerHudState.replayFn()
+    end
+end
+
+local function findEventIndexAtTime(events, targetTime)
+    local lo, hi = 1, #events
+    local ans = #events + 1
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        if events[mid].songTime >= targetTime - 0.0001 then
+            ans = mid
+            hi = mid - 1
+        else
+            lo = mid + 1
+        end
+    end
+    return ans
+end
+
+local function parseAndPlayMidi(midiString, myId, onStart, meta)
     if playbackId ~= myId then return false end
 
     local mthdIdx = midiString:find("MThd", 1, true)
     if not mthdIdx then
         warn("[Piano] Missing MThd header")
-        if playbackId == myId then playing = false end
+        if playbackId == myId then
+            playing = false
+            setHudFailed("Invalid MIDI header")
+        end
         return false
     end
     if mthdIdx > 1 then
@@ -486,7 +577,10 @@ local function parseAndPlayMidi(midiString, myId, onStart)
 
     if not ok then
         warn("[Piano] MIDI parse error:", err)
-        if playbackId == myId then playing = false end
+        if playbackId == myId then
+            playing = false
+            setHudFailed("MIDI parse error")
+        end
         return false
     end
 
@@ -517,115 +611,265 @@ local function parseAndPlayMidi(midiString, myId, onStart)
         division = 96
     end
 
+    -- Precompute real song timestamps (at 1.0x speed) and active tempo for accurate progress & seeking
+    local preTempo = 500000
+    local prevTick = 0
+    local songSec = 0
+    for _, ev in ipairs(events) do
+        local dt = ev.time - prevTick
+        if dt > 0 then
+            local spt = isSmpte and (1 / smpteTicksPerSec) or ((preTempo / 1000000) / division)
+            songSec = songSec + dt * spt
+            prevTick = ev.time
+        end
+        ev.songTime = songSec
+        ev.tempoBefore = preTempo
+        if ev.type == "tempo" and ev.tempo > 0 then
+            preTempo = ev.tempo
+        end
+    end
+    local totalDuration = songSec
+
+    local songTitle = (meta and meta.title) or (PlayerHudState.status == "loading" and PlayerHudState.title) or "MIDI Song"
+    local songSubtitle = (meta and meta.subtitle) or (PlayerHudState.status == "loading" and PlayerHudState.subtitle) or "MIDI"
+    local replayMeta = {title = songTitle, subtitle = songSubtitle}
+
+    PlayerHudState.title = songTitle
+    PlayerHudState.subtitle = songSubtitle
+    PlayerHudState.currentTime = 0
+    PlayerHudState.totalTime = totalDuration
+    PlayerHudState.paused = false
+    PlayerHudState.seekTarget = nil
+    PlayerHudState.status = "playing"
+    PlayerHudState.replayFn = function()
+        stopPlayback()
+        local newId = playbackId
+        task.spawn(function()
+            parseAndPlayMidi(midiString, newId, nil, replayMeta)
+        end)
+    end
+
     playing = true
     if onStart then
         pcall(onStart)
     end
 
-    local currentTempo = 500000
-    local lastTime = 0
-    local nextEventClock = os.clock()
-    local lastYieldClock = nextEventClock
+    local idx = 1
+    local nEvents = #events
+    local lastClock = os.clock()
+    local lastYieldClock = lastClock
 
-    for _, ev in ipairs(events) do
+    while idx <= nEvents do
         if not playing or playbackId ~= myId then break end
 
-        local deltaTicks = ev.time - lastTime
-        if deltaTicks > 0 then
+        if PlayerHudState.seekTarget ~= nil then
+            local target = math.clamp(PlayerHudState.seekTarget, 0, totalDuration)
+            PlayerHudState.seekTarget = nil
+            releaseHeldKeys()
+            PlayerHudState.currentTime = target
+            idx = findEventIndexAtTime(events, target)
+            lastClock = os.clock()
+            lastYieldClock = lastClock
+        elseif PlayerHudState.paused then
+            releaseHeldKeys()
+            task.wait(0.04)
+            lastClock = os.clock()
+            lastYieldClock = lastClock
+        else
+            local now = os.clock()
+            local dtReal = math.min(now - lastClock, 0.5)
+            lastClock = now
             local speed = math.max(currentPlaybackSpeed, 0.05)
-            local secondsPerTick = isSmpte and (1 / smpteTicksPerSec) or ((currentTempo / 1000000) / division)
-            local waitTime = (deltaTicks * secondsPerTick) / speed
-            nextEventClock = nextEventClock + waitTime
+            PlayerHudState.currentTime = math.min(totalDuration, PlayerHudState.currentTime + dtReal * speed)
 
-            local remaining = nextEventClock - os.clock()
-            if remaining > 0 then
-                task.wait(remaining)
+            local ev = events[idx]
+            if PlayerHudState.currentTime + 0.0005 >= ev.songTime then
+                while idx <= nEvents and PlayerHudState.currentTime + 0.0005 >= events[idx].songTime do
+                    if not playing or playbackId ~= myId or PlayerHudState.paused or PlayerHudState.seekTarget ~= nil then
+                        break
+                    end
+                    local curEv = events[idx]
+                    if curEv.type == "note" then
+                        local char = MidiToChar[curEv.key]
+                        if char then
+                            playChar(char)
+                        end
+                    end
+                    idx = idx + 1
+                    if os.clock() - lastYieldClock > 0.03 then
+                        task.wait()
+                        lastYieldClock = os.clock()
+                        lastClock = os.clock()
+                    end
+                end
+            else
+                local songGap = ev.songTime - PlayerHudState.currentTime
+                local realWait = songGap / speed
+                local slice = math.min(realWait, 0.04)
+                if slice > 0.002 then
+                    task.wait(slice)
+                else
+                    task.wait()
+                end
                 lastYieldClock = os.clock()
-            elseif remaining < -0.5 then
-                nextEventClock = os.clock()
-            end
-            lastTime = ev.time
-        end
-
-        if not playing or playbackId ~= myId then break end
-
-        if os.clock() - lastYieldClock > 0.03 then
-            task.wait()
-            lastYieldClock = os.clock()
-        end
-
-        if ev.type == "tempo" then
-            if ev.tempo > 0 then
-                currentTempo = ev.tempo
-            end
-        elseif ev.type == "note" then
-            local char = MidiToChar[ev.key]
-            if char then
-                playChar(char)
             end
         end
     end
 
     if playbackId == myId then
         playing = false
+        PlayerHudState.paused = false
+        if idx > nEvents then
+            PlayerHudState.currentTime = totalDuration
+            PlayerHudState.status = "finished"
+        elseif PlayerHudState.status ~= "stopped" then
+            PlayerHudState.status = "stopped"
+        end
         releaseHeldKeys()
     end
     return true
 end
 
-local function playTextSheet(sheet, bpm, myId)
+local function playTextSheet(sheet, bpm, myId, meta)
     if playbackId ~= myId then return end
-    playing = true
+
+    local baseStep = 60 / math.max(tonumber(bpm) or 120, 1) / 2
+    local events = {}
+    local songSec = 0
     local i = 1
     local len = #sheet
 
     while i <= len do
-        if not playing or playbackId ~= myId then break end
-
-        local step = (60 / bpm / 2) / currentPlaybackSpeed
         local ch = sheet:sub(i, i)
-
         if ch == "[" then
             local closeIdx = sheet:find("]", i + 1, true)
             if closeIdx then
                 local group = sheet:sub(i + 1, closeIdx - 1)
                 if group:find(" ") then
                     for j = 1, #group do
-                        if not playing or playbackId ~= myId then break end
                         local gc = group:sub(j, j)
                         if CharToKeyInfo[gc] then
-                            playChar(gc)
-                            task.wait(math.min(step * 0.35, 0.06))
+                            table.insert(events, {songTime = songSec, chars = {gc}})
+                            songSec = songSec + math.min(baseStep * 0.35, 0.06)
                         end
                     end
-                    task.wait(step * 0.5)
+                    songSec = songSec + baseStep * 0.5
                 else
+                    local chord = {}
                     for j = 1, #group do
                         local gc = group:sub(j, j)
                         if CharToKeyInfo[gc] then
-                            playChar(gc)
+                            table.insert(chord, gc)
                         end
                     end
-                    task.wait(step)
+                    if #chord > 0 then
+                        table.insert(events, {songTime = songSec, chars = chord})
+                    end
+                    songSec = songSec + baseStep
                 end
                 i = closeIdx + 1
             else
                 i = i + 1
             end
         elseif ch == " " or ch == "-" or ch == "|" or ch == "\n" then
-            task.wait(step)
+            songSec = songSec + baseStep
             i = i + 1
         elseif CharToKeyInfo[ch] then
-            playChar(ch)
-            task.wait(step)
+            table.insert(events, {songTime = songSec, chars = {ch}})
+            songSec = songSec + baseStep
             i = i + 1
         else
             i = i + 1
         end
     end
 
+    local totalDuration = songSec
+    local songTitle = (meta and meta.title) or ("Text Sheet (" .. tostring(bpm) .. " BPM)")
+    local songSubtitle = (meta and meta.subtitle) or "Text Sheet"
+    local replayMeta = {title = songTitle, subtitle = songSubtitle}
+
+    PlayerHudState.title = songTitle
+    PlayerHudState.subtitle = songSubtitle
+    PlayerHudState.currentTime = 0
+    PlayerHudState.totalTime = totalDuration
+    PlayerHudState.paused = false
+    PlayerHudState.seekTarget = nil
+    PlayerHudState.status = "playing"
+    PlayerHudState.replayFn = function()
+        stopPlayback()
+        local newId = playbackId
+        task.spawn(playTextSheet, sheet, bpm, newId, replayMeta)
+    end
+
+    playing = true
+    local idx = 1
+    local nEvents = #events
+    local lastClock = os.clock()
+    local lastYieldClock = lastClock
+
+    while idx <= nEvents do
+        if not playing or playbackId ~= myId then break end
+
+        if PlayerHudState.seekTarget ~= nil then
+            local target = math.clamp(PlayerHudState.seekTarget, 0, totalDuration)
+            PlayerHudState.seekTarget = nil
+            releaseHeldKeys()
+            PlayerHudState.currentTime = target
+            idx = findEventIndexAtTime(events, target)
+            lastClock = os.clock()
+            lastYieldClock = lastClock
+        elseif PlayerHudState.paused then
+            releaseHeldKeys()
+            task.wait(0.04)
+            lastClock = os.clock()
+            lastYieldClock = lastClock
+        else
+            local now = os.clock()
+            local dtReal = math.min(now - lastClock, 0.5)
+            lastClock = now
+            local speed = math.max(currentPlaybackSpeed, 0.05)
+            PlayerHudState.currentTime = math.min(totalDuration, PlayerHudState.currentTime + dtReal * speed)
+
+            local ev = events[idx]
+            if PlayerHudState.currentTime + 0.0005 >= ev.songTime then
+                while idx <= nEvents and PlayerHudState.currentTime + 0.0005 >= events[idx].songTime do
+                    if not playing or playbackId ~= myId or PlayerHudState.paused or PlayerHudState.seekTarget ~= nil then
+                        break
+                    end
+                    for _, gc in ipairs(events[idx].chars) do
+                        playChar(gc)
+                    end
+                    idx = idx + 1
+                    if os.clock() - lastYieldClock > 0.03 then
+                        task.wait()
+                        lastYieldClock = os.clock()
+                        lastClock = os.clock()
+                    end
+                end
+            else
+                local songGap = ev.songTime - PlayerHudState.currentTime
+                local realWait = songGap / speed
+                local slice = math.min(realWait, 0.04)
+                if slice > 0.002 then
+                    task.wait(slice)
+                else
+                    task.wait()
+                end
+                lastYieldClock = os.clock()
+            end
+        end
+    end
+
     if playbackId == myId then
         playing = false
+        PlayerHudState.paused = false
+        if idx > nEvents then
+            PlayerHudState.currentTime = totalDuration
+            PlayerHudState.status = "finished"
+        elseif PlayerHudState.status ~= "stopped" then
+            PlayerHudState.status = "stopped"
+        end
+        releaseHeldKeys()
     end
 end
 
@@ -1549,7 +1793,16 @@ local function resolveAndFetchMidiUrl(rawUrl, shouldAbort)
     return fetchMidiBytesWithRetry(url, nil, shouldAbort)
 end
 
-local function downloadAndPlayUrl(rawUrl, sourceName, silent)
+local function deriveTitleFromUrl(url)
+    local lastSeg = tostring(url or ""):match("([^/%?#]+)%s*$") or "Direct URL"
+    lastSeg = lastSeg:gsub("%.midi?$", ""):gsub("%%(%x%x)", function(hex)
+        return string.char(tonumber(hex, 16))
+    end)
+    if lastSeg == "" then return "Direct URL" end
+    return lastSeg
+end
+
+local function downloadAndPlayUrl(rawUrl, sourceName, silent, displayTitle)
     local url = normalizeMidiUrl(rawUrl)
     if not url or not url:match("^https?://") then
         if not silent then
@@ -1562,8 +1815,10 @@ local function downloadAndPlayUrl(rawUrl, sourceName, silent)
         return
     end
 
+    local title = displayTitle or deriveTitleFromUrl(url)
     stopPlayback()
     local myId = playbackId
+    setHudLoading(title, sourceName or "URL")
 
     task.spawn(function()
         local ok, midiBody, err = resolveAndFetchMidiUrl(url, function()
@@ -1574,6 +1829,7 @@ local function downloadAndPlayUrl(rawUrl, sourceName, silent)
 
         if not ok then
             warn("[" .. sourceName .. "] Load failed:", err, "| URL:", url)
+            setHudFailed("Load failed")
             if not silent then
                 Rayfield:Notify({
                     Title = "Song Load Failed",
@@ -1584,7 +1840,7 @@ local function downloadAndPlayUrl(rawUrl, sourceName, silent)
             return
         end
 
-        local played = parseAndPlayMidi(midiBody, myId)
+        local played = parseAndPlayMidi(midiBody, myId, nil, {title = title, subtitle = sourceName or "URL"})
         if not played and playbackId == myId and not silent then
             Rayfield:Notify({
                 Title = "Invalid MIDI",
@@ -1752,7 +2008,7 @@ local function playQuickPickSelection(label)
         Rayfield:Notify({Title = "No Song Selected", Content = "Pick a song from the dropdown first.", Duration = 3})
         return
     end
-    downloadAndPlayUrl(url, "QuickPick", false)
+    downloadAndPlayUrl(url, "QuickPick", false, label)
 end
 
 local QuickSearchInput = QuickTab:CreateInput({
@@ -1822,6 +2078,7 @@ QuickTab:CreateButton({
                 if playbackId ~= myId then return end
                 QuickState.statusActive = true
                 setLabelSafe(QuickStatusLabel, string.format("Auto-trying (%d/%d): %s", idx, #candidates, entry.label))
+                setHudLoading(entry.label, string.format("QuickPick (%d/%d)", idx, #candidates))
                 local ok, midiBody = fetchMidiBytesWithRetry(entry.url, nil, function()
                     return playbackId ~= myId
                 end)
@@ -1831,7 +2088,7 @@ QuickTab:CreateButton({
                         QuickState.statusActive = true
                         setLabelSafe(QuickStatusLabel, "Playing: " .. entry.label)
                         Rayfield:Notify({Title = "Loaded & Playing", Content = entry.label, Duration = 3})
-                    end)
+                    end, {title = entry.label, subtitle = "QuickPick"})
                     if playbackId ~= myId then return end
                     if played then
                         updateQuickStatusLabel()
@@ -1841,6 +2098,7 @@ QuickTab:CreateButton({
             end
 
             if playbackId == myId then
+                setHudFailed("No working Quick Pick found")
                 updateQuickStatusLabel()
                 Rayfield:Notify({Title = "Auto-Try Failed", Content = "None of the matching Quick Picks returned valid MIDI data.", Duration = 4})
             end
@@ -2049,6 +2307,15 @@ QuickTab:CreateButton({
 
 QuickTab:CreateSection("Playback Controls")
 
+local ShowPlayerHudToggle = QuickTab:CreateToggle({
+    Name = "📺 Show Onscreen Progress Bar",
+    CurrentValue = true,
+    Flag = "ShowPlayerHud",
+    Callback = function(Value)
+        PlayerHudState.enabled = Value
+    end,
+})
+
 QuickTab:CreateSlider({
     Name = "Playback Speed",
     Range = {0.1, 5},
@@ -2059,6 +2326,11 @@ QuickTab:CreateSlider({
     Callback = function(Value)
         currentPlaybackSpeed = Value
     end,
+})
+
+QuickTab:CreateButton({
+    Name = "⏯️ Pause / Resume",
+    Callback = togglePausePlayback,
 })
 
 QuickTab:CreateButton({
@@ -2153,7 +2425,7 @@ local function playLocalSelection(label)
     stopPlayback()
     local myId = playbackId
     task.spawn(function()
-        local played = parseAndPlayMidi(content, myId)
+        local played = parseAndPlayMidi(content, myId, nil, {title = label, subtitle = "Local .mid"})
         if not played and playbackId == myId then
             Rayfield:Notify({Title = "MIDI Parse Error", Content = "Could not parse the selected local MIDI file.", Duration = 4})
         end
@@ -2251,7 +2523,10 @@ LocalTab:CreateButton({
         if pastedSheet == "" then return end
         stopPlayback()
         local myId = playbackId
-        task.spawn(playTextSheet, pastedSheet, sheetBpm, myId)
+        task.spawn(playTextSheet, pastedSheet, sheetBpm, myId, {
+            title = "Text Sheet (" .. tostring(sheetBpm) .. " BPM)",
+            subtitle = "Text Sheet",
+        })
     end,
 })
 
@@ -2300,6 +2575,7 @@ local function playNanoSelection(label, silent)
 
     stopPlayback()
     local myId = playbackId
+    setHudLoading(label, "NanoMIDI")
 
     task.spawn(function()
         local url = "https://api.nanomidi.net/api/midis/" .. encodeUrlPath(tostring(song.midiFilename))
@@ -2310,12 +2586,13 @@ local function playNanoSelection(label, silent)
         if playbackId ~= myId then return end
 
         if ok and midiBody then
-            local played = parseAndPlayMidi(midiBody, myId)
+            local played = parseAndPlayMidi(midiBody, myId, nil, {title = label, subtitle = "NanoMIDI"})
             if not played and playbackId == myId and not silent then
                 Rayfield:Notify({Title = "NanoMIDI Invalid MIDI", Content = "Downloaded file could not be parsed as MIDI.", Duration = 4})
             end
         else
             warn("[NanoMIDI] Download failed:", err)
+            setHudFailed("Load failed")
             if not silent then
                 Rayfield:Notify({Title = "NanoMIDI Load Failed", Content = tostring(err), Duration = 4})
             end
@@ -2493,12 +2770,14 @@ local function playMuseScoreEntry(rawUrlOrId, displayName, silent)
         return
     end
 
+    local titleText = tostring(displayName or target)
     stopPlayback()
     local myId = playbackId
+    setHudLoading(titleText, "MuseScore")
 
     task.spawn(function()
         MuseState.statusActive = true
-        setLabelSafe(MuseStatusLabel, "MuseScore: Loading " .. tostring(displayName or target))
+        setLabelSafe(MuseStatusLabel, "MuseScore: Loading " .. titleText)
         local ok, midiBody, err = fetchMuseScoreMidi(target, function()
             return playbackId ~= myId
         end)
@@ -2507,8 +2786,8 @@ local function playMuseScoreEntry(rawUrlOrId, displayName, silent)
         if ok and midiBody then
             local played = parseAndPlayMidi(midiBody, myId, function()
                 MuseState.statusActive = true
-                setLabelSafe(MuseStatusLabel, "MuseScore Playing: " .. tostring(displayName or target))
-            end)
+                setLabelSafe(MuseStatusLabel, "MuseScore Playing: " .. titleText)
+            end, {title = titleText, subtitle = "MuseScore"})
             if playbackId ~= myId then return end
             if played then
                 updateMuseStatusLabel()
@@ -2522,6 +2801,7 @@ local function playMuseScoreEntry(rawUrlOrId, displayName, silent)
         else
             MuseState.statusActive = true
             setLabelSafe(MuseStatusLabel, "MuseScore Failed: " .. tostring(err))
+            setHudFailed("Load failed")
             if not silent then
                 Rayfield:Notify({Title = "MuseScore Load Failed", Content = tostring(err), Duration = 4})
             end
@@ -2667,6 +2947,7 @@ ExternalTab:CreateButton({
                 if playbackId ~= myId then return end
                 MuseState.statusActive = true
                 setLabelSafe(MuseStatusLabel, string.format("MuseScore auto-trying (%d/%d): %s", idx, #candidates, entry.label))
+                setHudLoading(entry.label, string.format("MuseScore (%d/%d)", idx, #candidates))
                 local ok, midiBody = fetchMuseScoreMidi(entry.url, function()
                     return playbackId ~= myId
                 end)
@@ -2676,7 +2957,7 @@ ExternalTab:CreateButton({
                         MuseState.statusActive = true
                         setLabelSafe(MuseStatusLabel, "MuseScore Playing: " .. entry.label)
                         Rayfield:Notify({Title = "MuseScore Playing", Content = entry.label, Duration = 3})
-                    end)
+                    end, {title = entry.label, subtitle = "MuseScore"})
                     if playbackId ~= myId then return end
                     if played then
                         updateMuseStatusLabel()
@@ -2685,6 +2966,7 @@ ExternalTab:CreateButton({
                 end
             end
             if playbackId == myId then
+                setHudFailed("No playable MuseScore MIDI found")
                 updateMuseStatusLabel()
                 Rayfield:Notify({Title = "MuseScore Auto-Try Failed", Content = "No playable MIDI found in current results.", Duration = 4})
             end
@@ -2742,12 +3024,14 @@ local function playMidiShowEntry(rawUrlOrId, displayName, silent)
         return
     end
 
+    local titleText = tostring(displayName or target)
     stopPlayback()
     local myId = playbackId
+    setHudLoading(titleText, "MidiShow")
 
     task.spawn(function()
         MidiShowState.statusActive = true
-        setLabelSafe(MidiShowStatusLabel, "MidiShow: Loading " .. tostring(displayName or target))
+        setLabelSafe(MidiShowStatusLabel, "MidiShow: Loading " .. titleText)
         local ok, midiBody, err = fetchMidiShowMidi(target, function()
             return playbackId ~= myId
         end)
@@ -2756,8 +3040,8 @@ local function playMidiShowEntry(rawUrlOrId, displayName, silent)
         if ok and midiBody then
             local played = parseAndPlayMidi(midiBody, myId, function()
                 MidiShowState.statusActive = true
-                setLabelSafe(MidiShowStatusLabel, "MidiShow Playing: " .. tostring(displayName or target))
-            end)
+                setLabelSafe(MidiShowStatusLabel, "MidiShow Playing: " .. titleText)
+            end, {title = titleText, subtitle = "MidiShow"})
             if playbackId ~= myId then return end
             if played then
                 updateMidiShowStatusLabel()
@@ -2771,6 +3055,7 @@ local function playMidiShowEntry(rawUrlOrId, displayName, silent)
         else
             MidiShowState.statusActive = true
             setLabelSafe(MidiShowStatusLabel, "MidiShow Failed: " .. tostring(err))
+            setHudFailed("Load failed")
             if not silent then
                 Rayfield:Notify({Title = "MidiShow Load Failed", Content = tostring(err), Duration = 5})
             end
@@ -2916,6 +3201,7 @@ ExternalTab:CreateButton({
                 if playbackId ~= myId then return end
                 MidiShowState.statusActive = true
                 setLabelSafe(MidiShowStatusLabel, string.format("MidiShow auto-trying (%d/%d): %s", idx, #candidates, entry.label))
+                setHudLoading(entry.label, string.format("MidiShow (%d/%d)", idx, #candidates))
                 local ok, midiBody = fetchMidiShowMidi(entry.url, function()
                     return playbackId ~= myId
                 end)
@@ -2925,7 +3211,7 @@ ExternalTab:CreateButton({
                         MidiShowState.statusActive = true
                         setLabelSafe(MidiShowStatusLabel, "MidiShow Playing: " .. entry.label)
                         Rayfield:Notify({Title = "MidiShow Playing", Content = entry.label, Duration = 3})
-                    end)
+                    end, {title = entry.label, subtitle = "MidiShow"})
                     if playbackId ~= myId then return end
                     if played then
                         updateMidiShowStatusLabel()
@@ -2934,6 +3220,7 @@ ExternalTab:CreateButton({
                 end
             end
             if playbackId == myId then
+                setHudFailed("No playable MidiShow MIDI found")
                 updateMidiShowStatusLabel()
                 Rayfield:Notify({Title = "MidiShow Auto-Try Failed", Content = "No playable MIDI found in current results.", Duration = 4})
             end
@@ -3028,6 +3315,7 @@ local function buildGlobalMatches(query)
         end
         seenKeys[display] = true
         entry.display = display
+        entry.source = sourceTag
         allEntries[display] = entry
         table.insert(displayNames, display)
     end
@@ -3172,6 +3460,7 @@ GlobalTab:CreateButton({
 
         stopPlayback()
         local myId = playbackId
+        setHudLoading(entry.label or entry.display, entry.source or "Global Search")
 
         task.spawn(function()
             GlobalState.statusActive = true
@@ -3183,7 +3472,7 @@ GlobalTab:CreateButton({
                 local played = parseAndPlayMidi(midiBody, myId, function()
                     GlobalState.statusActive = true
                     setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
-                end)
+                end, {title = entry.label or entry.display, subtitle = entry.source or "Global Search"})
                 if playbackId ~= myId then return end
                 if played then
                     updateGlobalStatusLabel()
@@ -3195,6 +3484,7 @@ GlobalTab:CreateButton({
             else
                 GlobalState.statusActive = true
                 setLabelSafe(GlobalStatusLabel, "Failed: " .. entry.display)
+                setHudFailed("Load failed")
                 Rayfield:Notify({Title = "Song Load Failed", Content = "Try 'Auto-Try Matching Songs' to test other sources.", Duration = 4})
             end
         end)
@@ -3225,6 +3515,7 @@ GlobalTab:CreateButton({
                 if playbackId ~= myId then return end
                 GlobalState.statusActive = true
                 setLabelSafe(GlobalStatusLabel, string.format("Auto-trying (%d/%d): %s", idx, #queue, entry.display))
+                setHudLoading(entry.label or entry.display, string.format("%s (%d/%d)", entry.source or "Global", idx, #queue))
                 local ok, midiBody = tryLoadGlobalEntry(entry, myId)
                 if playbackId ~= myId then return end
 
@@ -3233,7 +3524,7 @@ GlobalTab:CreateButton({
                         GlobalState.statusActive = true
                         setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
                         Rayfield:Notify({Title = "Auto-Loaded & Playing", Content = entry.display, Duration = 3})
-                    end)
+                    end, {title = entry.label or entry.display, subtitle = entry.source or "Global Search"})
                     if playbackId ~= myId then return end
                     if played then
                         updateGlobalStatusLabel()
@@ -3245,6 +3536,7 @@ GlobalTab:CreateButton({
             if playbackId == myId then
                 GlobalState.statusActive = true
                 setLabelSafe(GlobalStatusLabel, "Auto-try finished: no working MIDI found")
+                setHudFailed("No working MIDI found")
                 Rayfield:Notify({Title = "Auto-Try Failed", Content = "None of the matching entries returned valid MIDI.", Duration = 4})
             end
         end)
@@ -3275,3 +3567,580 @@ GlobalTab:CreateButton({
     Name = "⏹️ Stop",
     Callback = stopPlayback,
 })
+
+-- ==========================================
+-- Onscreen Spotify-Style Player Progress Bar HUD
+-- ==========================================
+local function getHudContainer()
+    local ok, hiddenUi = pcall(function()
+        return gethui and gethui()
+    end)
+    if ok and typeof(hiddenUi) == "Instance" then
+        return hiddenUi
+    end
+    local cgOk = pcall(function()
+        local _ = CoreGui.Name
+    end)
+    if cgOk then
+        return CoreGui
+    end
+    local lp = Players.LocalPlayer
+    if lp then
+        return lp:FindFirstChildOfClass("PlayerGui") or lp:WaitForChild("PlayerGui", 5)
+    end
+    return nil
+end
+
+local function createOnscreenPlayerHud()
+    local parentContainer = getHudContainer()
+    if not parentContainer then
+        warn("[Piano] Could not find GUI container for onscreen player bar")
+        return
+    end
+
+    local existing = parentContainer:FindFirstChild("UniversalPianoPlayerHUD")
+    if existing then
+        pcall(function() existing:Destroy() end)
+    end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "UniversalPianoPlayerHUD"
+    screenGui.ResetOnSpawn = false
+    screenGui.IgnoreGuiInset = true
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.DisplayOrder = 50
+    screenGui.Parent = parentContainer
+
+    local hudFrame = Instance.new("Frame")
+    hudFrame.Name = "PlayerBar"
+    hudFrame.AnchorPoint = Vector2.new(0.5, 1)
+    hudFrame.Position = UDim2.new(0.5, 0, 1, -18)
+    hudFrame.Size = UDim2.new(0.62, 0, 0, 74)
+    hudFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
+    hudFrame.BackgroundTransparency = 0.05
+    hudFrame.BorderSizePixel = 0
+    hudFrame.Active = true
+    hudFrame.Parent = screenGui
+
+    local sizeConstraint = Instance.new("UISizeConstraint")
+    sizeConstraint.MinSize = Vector2.new(360, 70)
+    sizeConstraint.MaxSize = Vector2.new(740, 78)
+    sizeConstraint.Parent = hudFrame
+
+    local hudCorner = Instance.new("UICorner")
+    hudCorner.CornerRadius = UDim.new(0, 12)
+    hudCorner.Parent = hudFrame
+
+    local hudStroke = Instance.new("UIStroke")
+    hudStroke.Color = Color3.fromRGB(48, 48, 56)
+    hudStroke.Thickness = 1
+    hudStroke.Parent = hudFrame
+
+    local hudPad = Instance.new("UIPadding")
+    hudPad.PaddingLeft = UDim.new(0, 12)
+    hudPad.PaddingRight = UDim.new(0, 12)
+    hudPad.PaddingTop = UDim.new(0, 7)
+    hudPad.PaddingBottom = UDim.new(0, 7)
+    hudPad.Parent = hudFrame
+
+    -- Left Section: Album-style music icon + Title / Subtitle
+    local leftSection = Instance.new("Frame")
+    leftSection.Name = "TrackInfo"
+    leftSection.Size = UDim2.new(0.30, -8, 1, 0)
+    leftSection.BackgroundTransparency = 1
+    leftSection.Parent = hudFrame
+
+    local artBox = Instance.new("Frame")
+    artBox.Name = "ArtBadge"
+    artBox.AnchorPoint = Vector2.new(0, 0.5)
+    artBox.Position = UDim2.new(0, 0, 0.5, 0)
+    artBox.Size = UDim2.new(0, 40, 0, 40)
+    artBox.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
+    artBox.BorderSizePixel = 0
+    artBox.Parent = leftSection
+
+    local artCorner = Instance.new("UICorner")
+    artCorner.CornerRadius = UDim.new(0, 7)
+    artCorner.Parent = artBox
+
+    local artStroke = Instance.new("UIStroke")
+    artStroke.Color = Color3.fromRGB(58, 58, 66)
+    artStroke.Thickness = 1
+    artStroke.Parent = artBox
+
+    local artGlyph = Instance.new("TextLabel")
+    artGlyph.Size = UDim2.new(1, 0, 1, 0)
+    artGlyph.BackgroundTransparency = 1
+    artGlyph.Text = "♫"
+    artGlyph.Font = Enum.Font.GothamBold
+    artGlyph.TextSize = 18
+    artGlyph.TextColor3 = Color3.fromRGB(235, 235, 242)
+    artGlyph.Parent = artBox
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Name = "Title"
+    titleLabel.Position = UDim2.new(0, 48, 0, 10)
+    titleLabel.Size = UDim2.new(1, -48, 0, 18)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = "No song playing"
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextSize = 13
+    titleLabel.TextColor3 = Color3.fromRGB(248, 248, 250)
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    titleLabel.Parent = leftSection
+
+    local subtitleLabel = Instance.new("TextLabel")
+    subtitleLabel.Name = "Subtitle"
+    subtitleLabel.Position = UDim2.new(0, 48, 0, 29)
+    subtitleLabel.Size = UDim2.new(1, -48, 0, 16)
+    subtitleLabel.BackgroundTransparency = 1
+    subtitleLabel.Text = "Select a song to start"
+    subtitleLabel.Font = Enum.Font.Gotham
+    subtitleLabel.TextSize = 11
+    subtitleLabel.TextColor3 = Color3.fromRGB(165, 165, 175)
+    subtitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    subtitleLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    subtitleLabel.Parent = leftSection
+
+    -- Center Section: Transport buttons + Elapsed / Progress Bar / Total Length
+    local centerSection = Instance.new("Frame")
+    centerSection.Name = "CenterControls"
+    centerSection.Position = UDim2.new(0.30, 0, 0, 0)
+    centerSection.Size = UDim2.new(0.54, 0, 1, 0)
+    centerSection.BackgroundTransparency = 1
+    centerSection.Parent = hudFrame
+
+    local controlsRow = Instance.new("Frame")
+    controlsRow.Name = "TransportRow"
+    controlsRow.Size = UDim2.new(1, 0, 0, 32)
+    controlsRow.BackgroundTransparency = 1
+    controlsRow.Parent = centerSection
+
+    local controlsLayout = Instance.new("UIListLayout")
+    controlsLayout.FillDirection = Enum.FillDirection.Horizontal
+    controlsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    controlsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    controlsLayout.Padding = UDim.new(0, 14)
+    controlsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    controlsLayout.Parent = controlsRow
+
+    -- Restart Button (|<)
+    local restartBtn = Instance.new("TextButton")
+    restartBtn.Name = "RestartButton"
+    restartBtn.LayoutOrder = 1
+    restartBtn.Size = UDim2.new(0, 26, 0, 26)
+    restartBtn.BackgroundTransparency = 1
+    restartBtn.Text = ""
+    restartBtn.AutoButtonColor = false
+    restartBtn.Parent = controlsRow
+
+    local restartBar = Instance.new("Frame")
+    restartBar.AnchorPoint = Vector2.new(0, 0.5)
+    restartBar.Position = UDim2.new(0, 5, 0.5, 0)
+    restartBar.Size = UDim2.new(0, 2, 0, 10)
+    restartBar.BackgroundColor3 = Color3.fromRGB(190, 190, 200)
+    restartBar.BorderSizePixel = 0
+    restartBar.Parent = restartBtn
+
+    local restartArrow = Instance.new("TextLabel")
+    restartArrow.AnchorPoint = Vector2.new(0, 0.5)
+    restartArrow.Position = UDim2.new(0, 8, 0.5, 0)
+    restartArrow.Size = UDim2.new(0, 14, 0, 14)
+    restartArrow.BackgroundTransparency = 1
+    restartArrow.Text = "◀"
+    restartArrow.Font = Enum.Font.GothamBold
+    restartArrow.TextSize = 11
+    restartArrow.TextColor3 = Color3.fromRGB(190, 190, 200)
+    restartArrow.Parent = restartBtn
+
+    -- Play / Pause White Circle Button
+    local playPauseBtn = Instance.new("TextButton")
+    playPauseBtn.Name = "PlayPauseButton"
+    playPauseBtn.LayoutOrder = 2
+    playPauseBtn.Size = UDim2.new(0, 30, 0, 30)
+    playPauseBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    playPauseBtn.Text = ""
+    playPauseBtn.AutoButtonColor = false
+    playPauseBtn.Parent = controlsRow
+
+    local ppCorner = Instance.new("UICorner")
+    ppCorner.CornerRadius = UDim.new(1, 0)
+    ppCorner.Parent = playPauseBtn
+
+    local playGlyph = Instance.new("TextLabel")
+    playGlyph.Name = "PlayGlyph"
+    playGlyph.Size = UDim2.new(1, 0, 1, 0)
+    playGlyph.Position = UDim2.new(0, 1, 0, 0)
+    playGlyph.BackgroundTransparency = 1
+    playGlyph.Text = "▶"
+    playGlyph.Font = Enum.Font.GothamBold
+    playGlyph.TextSize = 13
+    playGlyph.TextColor3 = Color3.fromRGB(16, 16, 18)
+    playGlyph.Parent = playPauseBtn
+
+    local pauseGlyph = Instance.new("Frame")
+    pauseGlyph.Name = "PauseGlyph"
+    pauseGlyph.Size = UDim2.new(1, 0, 1, 0)
+    pauseGlyph.BackgroundTransparency = 1
+    pauseGlyph.Visible = false
+    pauseGlyph.Parent = playPauseBtn
+
+    local pBar1 = Instance.new("Frame")
+    pBar1.AnchorPoint = Vector2.new(0.5, 0.5)
+    pBar1.Position = UDim2.new(0.5, -3, 0.5, 0)
+    pBar1.Size = UDim2.new(0, 3, 0, 11)
+    pBar1.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
+    pBar1.BorderSizePixel = 0
+    pBar1.Parent = pauseGlyph
+
+    local pBar2 = Instance.new("Frame")
+    pBar2.AnchorPoint = Vector2.new(0.5, 0.5)
+    pBar2.Position = UDim2.new(0.5, 3, 0.5, 0)
+    pBar2.Size = UDim2.new(0, 3, 0, 11)
+    pBar2.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
+    pBar2.BorderSizePixel = 0
+    pBar2.Parent = pauseGlyph
+
+    -- Stop Button (square)
+    local stopBtn = Instance.new("TextButton")
+    stopBtn.Name = "StopButton"
+    stopBtn.LayoutOrder = 3
+    stopBtn.Size = UDim2.new(0, 26, 0, 26)
+    stopBtn.BackgroundTransparency = 1
+    stopBtn.Text = ""
+    stopBtn.AutoButtonColor = false
+    stopBtn.Parent = controlsRow
+
+    local stopSquare = Instance.new("Frame")
+    stopSquare.AnchorPoint = Vector2.new(0.5, 0.5)
+    stopSquare.Position = UDim2.new(0.5, 0, 0.5, 0)
+    stopSquare.Size = UDim2.new(0, 10, 0, 10)
+    stopSquare.BackgroundColor3 = Color3.fromRGB(190, 190, 200)
+    stopSquare.BorderSizePixel = 0
+    stopSquare.Parent = stopBtn
+
+    local stopCorner = Instance.new("UICorner")
+    stopCorner.CornerRadius = UDim.new(0, 2)
+    stopCorner.Parent = stopSquare
+
+    -- Progress Bar Row
+    local progressRow = Instance.new("Frame")
+    progressRow.Name = "ProgressRow"
+    progressRow.Position = UDim2.new(0, 0, 0, 34)
+    progressRow.Size = UDim2.new(1, 0, 0, 24)
+    progressRow.BackgroundTransparency = 1
+    progressRow.Parent = centerSection
+
+    local elapsedLabel = Instance.new("TextLabel")
+    elapsedLabel.Name = "Elapsed"
+    elapsedLabel.Size = UDim2.new(0, 42, 1, 0)
+    elapsedLabel.BackgroundTransparency = 1
+    elapsedLabel.Text = "0:00"
+    elapsedLabel.Font = Enum.Font.GothamMedium
+    elapsedLabel.TextSize = 11
+    elapsedLabel.TextColor3 = Color3.fromRGB(175, 175, 185)
+    elapsedLabel.TextXAlignment = Enum.TextXAlignment.Right
+    elapsedLabel.Parent = progressRow
+
+    local trackHitArea = Instance.new("TextButton")
+    trackHitArea.Name = "TrackHitArea"
+    trackHitArea.Position = UDim2.new(0, 48, 0, 0)
+    trackHitArea.Size = UDim2.new(1, -96, 1, 0)
+    trackHitArea.BackgroundTransparency = 1
+    trackHitArea.Text = ""
+    trackHitArea.AutoButtonColor = false
+    trackHitArea.Parent = progressRow
+
+    local trackBg = Instance.new("Frame")
+    trackBg.Name = "TrackBg"
+    trackBg.AnchorPoint = Vector2.new(0, 0.5)
+    trackBg.Position = UDim2.new(0, 0, 0.5, 0)
+    trackBg.Size = UDim2.new(1, 0, 0, 4)
+    trackBg.BackgroundColor3 = Color3.fromRGB(68, 68, 76)
+    trackBg.BorderSizePixel = 0
+    trackBg.Parent = trackHitArea
+
+    local trackBgCorner = Instance.new("UICorner")
+    trackBgCorner.CornerRadius = UDim.new(1, 0)
+    trackBgCorner.Parent = trackBg
+
+    local trackFill = Instance.new("Frame")
+    trackFill.Name = "TrackFill"
+    trackFill.Size = UDim2.new(0, 0, 1, 0)
+    trackFill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    trackFill.BorderSizePixel = 0
+    trackFill.Parent = trackBg
+
+    local trackFillCorner = Instance.new("UICorner")
+    trackFillCorner.CornerRadius = UDim.new(1, 0)
+    trackFillCorner.Parent = trackFill
+
+    local trackKnob = Instance.new("Frame")
+    trackKnob.Name = "TrackKnob"
+    trackKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+    trackKnob.Position = UDim2.new(0, 0, 0.5, 0)
+    trackKnob.Size = UDim2.new(0, 11, 0, 11)
+    trackKnob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    trackKnob.BorderSizePixel = 0
+    trackKnob.Visible = false
+    trackKnob.ZIndex = 3
+    trackKnob.Parent = trackBg
+
+    local knobCorner = Instance.new("UICorner")
+    knobCorner.CornerRadius = UDim.new(1, 0)
+    knobCorner.Parent = trackKnob
+
+    local totalLabel = Instance.new("TextLabel")
+    totalLabel.Name = "Total"
+    totalLabel.AnchorPoint = Vector2.new(1, 0)
+    totalLabel.Position = UDim2.new(1, 0, 0, 0)
+    totalLabel.Size = UDim2.new(0, 42, 1, 0)
+    totalLabel.BackgroundTransparency = 1
+    totalLabel.Text = "0:00"
+    totalLabel.Font = Enum.Font.GothamMedium
+    totalLabel.TextSize = 11
+    totalLabel.TextColor3 = Color3.fromRGB(175, 175, 185)
+    totalLabel.TextXAlignment = Enum.TextXAlignment.Left
+    totalLabel.Parent = progressRow
+
+    -- Right Section: Speed badge & Hide button
+    local rightSection = Instance.new("Frame")
+    rightSection.Name = "RightUtility"
+    rightSection.AnchorPoint = Vector2.new(1, 0)
+    rightSection.Position = UDim2.new(1, 0, 0, 0)
+    rightSection.Size = UDim2.new(0.16, -6, 1, 0)
+    rightSection.BackgroundTransparency = 1
+    rightSection.Parent = hudFrame
+
+    local speedBadge = Instance.new("TextLabel")
+    speedBadge.Name = "SpeedBadge"
+    speedBadge.AnchorPoint = Vector2.new(0, 0.5)
+    speedBadge.Position = UDim2.new(0, 2, 0.5, 0)
+    speedBadge.Size = UDim2.new(1, -28, 0, 22)
+    speedBadge.BackgroundColor3 = Color3.fromRGB(30, 30, 36)
+    speedBadge.Text = "1.0x"
+    speedBadge.Font = Enum.Font.GothamMedium
+    speedBadge.TextSize = 11
+    speedBadge.TextColor3 = Color3.fromRGB(205, 205, 215)
+    speedBadge.Parent = rightSection
+
+    local speedCorner = Instance.new("UICorner")
+    speedCorner.CornerRadius = UDim.new(0, 6)
+    speedCorner.Parent = speedBadge
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Name = "HideHudButton"
+    closeBtn.AnchorPoint = Vector2.new(1, 0.5)
+    closeBtn.Position = UDim2.new(1, 0, 0.5, 0)
+    closeBtn.Size = UDim2.new(0, 22, 0, 22)
+    closeBtn.BackgroundTransparency = 1
+    closeBtn.Text = "×"
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 16
+    closeBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
+    closeBtn.AutoButtonColor = false
+    closeBtn.Parent = rightSection
+
+    -- Button Hover & Click Handlers
+    local barHovered = false
+    trackHitArea.MouseEnter:Connect(function()
+        barHovered = true
+        trackFill.BackgroundColor3 = Color3.fromRGB(30, 215, 96)
+    end)
+    trackHitArea.MouseLeave:Connect(function()
+        barHovered = false
+        if not PlayerHudState.draggingBar then
+            trackFill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        end
+    end)
+
+    restartBtn.MouseEnter:Connect(function()
+        restartBar.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        restartArrow.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end)
+    restartBtn.MouseLeave:Connect(function()
+        restartBar.BackgroundColor3 = Color3.fromRGB(190, 190, 200)
+        restartArrow.TextColor3 = Color3.fromRGB(190, 190, 200)
+    end)
+    restartBtn.MouseButton1Click:Connect(function()
+        if PlayerHudState.replayFn then
+            PlayerHudState.replayFn()
+        end
+    end)
+
+    playPauseBtn.MouseEnter:Connect(function()
+        playPauseBtn.Size = UDim2.new(0, 32, 0, 32)
+    end)
+    playPauseBtn.MouseLeave:Connect(function()
+        playPauseBtn.Size = UDim2.new(0, 30, 0, 30)
+    end)
+    playPauseBtn.MouseButton1Click:Connect(function()
+        togglePausePlayback()
+    end)
+
+    stopBtn.MouseEnter:Connect(function()
+        stopSquare.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    end)
+    stopBtn.MouseLeave:Connect(function()
+        stopSquare.BackgroundColor3 = Color3.fromRGB(190, 190, 200)
+    end)
+    stopBtn.MouseButton1Click:Connect(function()
+        stopPlayback()
+    end)
+
+    closeBtn.MouseEnter:Connect(function()
+        closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end)
+    closeBtn.MouseLeave:Connect(function()
+        closeBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
+    end)
+    closeBtn.MouseButton1Click:Connect(function()
+        PlayerHudState.enabled = false
+        pcall(function()
+            ShowPlayerHudToggle:Set(false)
+        end)
+    end)
+
+    -- Progress Bar Seeking (Click & Drag)
+    local function computeSeekTime(screenX)
+        local width = trackBg.AbsoluteSize.X
+        if width <= 0 or PlayerHudState.totalTime <= 0 then
+            return 0
+        end
+        local frac = math.clamp((screenX - trackBg.AbsolutePosition.X) / width, 0, 1)
+        return frac * PlayerHudState.totalTime
+    end
+
+    trackHitArea.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            if PlayerHudState.totalTime > 0 and (PlayerHudState.status == "playing" or PlayerHudState.status == "paused") then
+                PlayerHudState.draggingBar = true
+                PlayerHudState.dragPreviewTime = computeSeekTime(input.Position.X)
+                trackFill.BackgroundColor3 = Color3.fromRGB(30, 215, 96)
+            end
+        end
+    end)
+
+    -- HUD Window Dragging (only when clicking non-control background area)
+    local function isPointInGui(guiObj, x, y)
+        local pos = guiObj.AbsolutePosition
+        local size = guiObj.AbsoluteSize
+        return x >= pos.X and x <= pos.X + size.X and y >= pos.Y and y <= pos.Y + size.Y
+    end
+
+    local draggingHud = false
+    local dragStartPos = nil
+    local hudStartPos = nil
+
+    hudFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            local px, py = input.Position.X, input.Position.Y
+            if isPointInGui(trackHitArea, px, py)
+                or isPointInGui(playPauseBtn, px, py)
+                or isPointInGui(restartBtn, px, py)
+                or isPointInGui(stopBtn, px, py)
+                or isPointInGui(closeBtn, px, py) then
+                return
+            end
+            draggingHud = true
+            dragStartPos = input.Position
+            hudStartPos = hudFrame.Position
+        end
+    end)
+
+    local inputChangedConn
+    local inputEndedConn
+    local renderConn
+
+    inputChangedConn = UserInputService.InputChanged:Connect(function(input)
+        if not screenGui.Parent then
+            if inputChangedConn then inputChangedConn:Disconnect() end
+            return
+        end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            if PlayerHudState.draggingBar then
+                PlayerHudState.dragPreviewTime = computeSeekTime(input.Position.X)
+            elseif draggingHud and dragStartPos and hudStartPos then
+                local delta = input.Position - dragStartPos
+                hudFrame.Position = UDim2.new(
+                    hudStartPos.X.Scale,
+                    hudStartPos.X.Offset + delta.X,
+                    hudStartPos.Y.Scale,
+                    hudStartPos.Y.Offset + delta.Y
+                )
+            end
+        end
+    end)
+
+    inputEndedConn = UserInputService.InputEnded:Connect(function(input)
+        if not screenGui.Parent then
+            if inputEndedConn then inputEndedConn:Disconnect() end
+            return
+        end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            if PlayerHudState.draggingBar then
+                PlayerHudState.draggingBar = false
+                if not barHovered then
+                    trackFill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                end
+                if playing and PlayerHudState.totalTime > 0 then
+                    PlayerHudState.seekTarget = PlayerHudState.dragPreviewTime
+                end
+            end
+            draggingHud = false
+        end
+    end)
+
+    -- 60fps HUD Render Loop
+    renderConn = RunService.RenderStepped:Connect(function()
+        if not screenGui.Parent then
+            if renderConn then renderConn:Disconnect() end
+            if inputChangedConn then inputChangedConn:Disconnect() end
+            if inputEndedConn then inputEndedConn:Disconnect() end
+            return
+        end
+
+        hudFrame.Visible = PlayerHudState.enabled == true
+        if not hudFrame.Visible then
+            return
+        end
+
+        titleLabel.Text = PlayerHudState.title
+
+        local statusPrefix = ""
+        if PlayerHudState.status == "paused" then
+            statusPrefix = "Paused · "
+        elseif PlayerHudState.status == "stopped" then
+            statusPrefix = "Stopped · "
+        elseif PlayerHudState.status == "finished" then
+            statusPrefix = "Finished · "
+        end
+        subtitleLabel.Text = statusPrefix .. PlayerHudState.subtitle
+
+        local isPlayingNow = (PlayerHudState.status == "playing")
+        playGlyph.Visible = not isPlayingNow
+        pauseGlyph.Visible = isPlayingNow
+
+        local total = PlayerHudState.totalTime
+        local shownCurrent = PlayerHudState.draggingBar and PlayerHudState.dragPreviewTime or PlayerHudState.currentTime
+        if total > 0 then
+            shownCurrent = math.clamp(shownCurrent, 0, total)
+        else
+            shownCurrent = 0
+        end
+
+        elapsedLabel.Text = formatDuration(shownCurrent)
+        totalLabel.Text = formatDuration(total)
+
+        local frac = total > 0 and math.clamp(shownCurrent / total, 0, 1) or 0
+        trackFill.Size = UDim2.new(frac, 0, 1, 0)
+        trackKnob.Position = UDim2.new(frac, 0, 0.5, 0)
+        trackKnob.Visible = (total > 0) and (barHovered or PlayerHudState.draggingBar)
+
+        speedBadge.Text = string.format("%.1fx", currentPlaybackSpeed)
+    end)
+end
+
+createOnscreenPlayerHud()
+
