@@ -14,9 +14,9 @@
 --   * Replay closures capture only small source strings, never the MIDI
 --     payload, so stopping a song frees its memory.
 
-local QUICKPICKS_REPO_URL = "https://raw.githubusercontent.com/285190-tech/piano/refs/heads/main/songs.json"
+local QUICKPICKS_REPO_URL = "https://raw.githubusercontent.com/q-29/piano/refs/heads/main/songs.json"
 local OBSIDIAN_LIBRARY_URL = "https://raw.githubusercontent.com/deividcomsono/Obsidian/refs/heads/main/Library.lua"
-local CORE_LIBRARY_URL = "https://raw.githubusercontent.com/285190-tech/piano/refs/heads/main/core.lua"
+local CORE_LIBRARY_URL = "https://raw.githubusercontent.com/q-29/piano/refs/heads/main/core.lua"
 
 local HttpService = game:GetService("HttpService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
@@ -1774,7 +1774,7 @@ end
 RepoBox:AddInput("RepoFileUrl", {
     Text = "GitHub Repo File URL (Auto-Loads)",
     Default = QUICKPICKS_REPO_URL,
-    Placeholder = "https://raw.githubusercontent.com/285190-tech/piano/refs/heads/main/songs.json",
+    Placeholder = "https://raw.githubusercontent.com/q-29/piano/refs/heads/main/songs.json",
     ClearTextOnFocus = false,
     Finished = true,
     Callback = function(Text)
