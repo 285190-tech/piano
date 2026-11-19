@@ -1,4 +1,22 @@
-local QUICKPICKS_REPO_URL = "https://raw.githubusercontent.com/q-29/piano/refs/heads/main/songs.json"
+-- piano.lua
+-- Universal Piano — Roblox piano player with MIDI streaming, local files,
+-- text sheets, NanoMIDI / MuseScore / MidiShow sources and a global search.
+--
+-- UI library: Obsidian (https://github.com/deividcomsono/Obsidian)
+-- Pure logic (MIDI parser, decoders, helpers) lives in core.lua, which this
+-- script loads from the same GitHub repository. Both files must be hosted
+-- together (see README.md).
+--
+-- Playback notes:
+--   * MIDI noteOff events are honored: each note is released when its
+--     noteOff arrives (or after a safety fallback if the file omits it).
+--   * Timing uses tick() (wall clock), not os.clock() (CPU time).
+--   * Replay closures capture only small source strings, never the MIDI
+--     payload, so stopping a song frees its memory.
+
+local QUICKPICKS_REPO_URL = "https://raw.githubusercontent.com/285190-tech/piano/refs/heads/main/songs.json"
+local OBSIDIAN_LIBRARY_URL = "https://raw.githubusercontent.com/deividcomsono/Obsidian/refs/heads/main/Library.lua"
+local CORE_LIBRARY_URL = "https://raw.githubusercontent.com/285190-tech/piano/refs/heads/main/core.lua"
 
 local HttpService = game:GetService("HttpService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
@@ -7,341 +25,68 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
 
--- ==========================================
--- Built-in Fallback Quick Picks (Validated)
--- ==========================================
-local DEFAULT_QUICKPICKS = {
-    {name = "Tokyo Ghoul - Unravel (Full)", url = "https://raw.githubusercontent.com/callmeyyzx/midi/main/%E3%80%90%E4%B8%9C%E4%BA%AC%E5%96%B0%E7%A7%8D%E4%B8%9C%E4%BA%AC%E9%A3%9F%E5%B0%B8%E9%AC%BC%E3%80%91OP-------Unravel.mid"},
-    {name = "Tokyo Ghoul - Unravel (Simple)", url = "https://raw.githubusercontent.com/MAraragi/MusicalScoreRecognition/master/new_midi_file/unravel_after.mid"},
-    {name = "JoJo - Giorno's Theme (Golden Wind)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Golden%20Wind_JJBA_Giorno_Giovannas_Theme_SOLO.mid"},
-    {name = "JoJo - Bloody Stream", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Bloody%20Stream%20%28JoJo%27s%20Bizarre%20Adventure%29.mid"},
-    {name = "JoJo - Awaken (Pillar Men)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Jojo%27s%20Bizarre%20Adventure-%20Awaken%20%28Pillar%20Men%20theme%29.mid"},
-    {name = "JoJo - Jonathan's Victory Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Jonathan%27s%20Victory%20Theme.mid"},
-    {name = "Rush E", url = "https://raw.githubusercontent.com/KiyoEditz/Maestro/main/rush_e_real.mid"},
-    {name = "Yiruma - River Flows in You", url = "https://raw.githubusercontent.com/KiyoEditz/Maestro/main/River-Flows-In-You.mid"},
-    {name = "JVKE - Golden Hour", url = "https://raw.githubusercontent.com/KiyoEditz/Maestro/main/JVKE%20-%20golden%20hour.mid"},
-    {name = "Canon Rock", url = "https://raw.githubusercontent.com/KiyoEditz/Maestro/main/Canon-Rock.mid"},
-    {name = "The Stranglers - Golden Brown", url = "https://raw.githubusercontent.com/KiyoEditz/Maestro/main/The%20Stranglers%20-%20Golden%20Brown%20%28Updated%29.mid"},
-    {name = "Beethoven - Fur Elise", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Fur%20Elise.mid"},
-    {name = "Beethoven - Moonlight Sonata (1st Mvt)", url = "https://raw.githubusercontent.com/KiyoEditz/Maestro/main/Beethoven%20-%20Moonlight%20Sonata%20%281st%20Movement%29%20.mid"},
-    {name = "Beethoven - Moonlight Sonata (3rd Mvt)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Beethoven-%20Moonlight%20Sonata%20%283rd%20mvt.%29.mid"},
-    {name = "Beethoven - Ode To Joy", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Beethoven%20-%20Ode%20To%20Joy.mid"},
-    {name = "Beethoven Virus", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Beethoven%20Virus%20%281%29.mid"},
-    {name = "Pachelbel - Canon in D", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Canon%20in%20D.mid"},
-    {name = "Erik Satie - Gymnopedie No. 1", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Erik%20Satie%20-%20Gymnopedie%20No.%201.mid"},
-    {name = "Chopin - Revolutionary Etude", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Chopin%27s%20revolutionary%20etude.mid"},
-    {name = "Chopin - Minute Waltz", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Chopin-Minute%20Waltz%20%28op%2064%20no%201%29.mid"},
-    {name = "Vivaldi - Four Seasons Winter (Rousseau)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Antonio%20Vivaldi%20-%20The%20Four%20Seasons%20%5BWinter%20Mvt%201.%5D%20%28Rousseau%20Cover%29.mid"},
-    {name = "Grieg - In the Hall of the Mountain King", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/In%20the%20hall%20of%20the%20Mountain%20King.mid"},
-    {name = "Monti - Czardas", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Czardas.mid"},
-    {name = "Scott Joplin - Maple Leaf Rag", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/JOPLIN.Maple%20leaf%20rag.mid"},
-    {name = "Howl's Moving Castle - Merry-Go-Round of Life", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Joe%20Hisaishi%20-%20Merry%20Go%20Round%20Of%20Life%20%28Howl%27s%20Moving%20Castle%29.mid"},
-    {name = "Naruto Shippuden - Blue Bird", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Blue%20Bird%20-%20Naruto%20Shippuden%20OP3.mid"},
-    {name = "Your Lie in April - Hikaru Nara", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Hikaru%20Nara.mid"},
-    {name = "Evangelion - Cruel Angel's Thesis", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Evangelion%20-%20Cruel%20Angel%27s%20Thesis.mid"},
-    {name = "Death Note - L's Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Death%20Note%20-%20L%27s%20Theme.mid"},
-    {name = "Attack on Titan - Jiyuu no Tsubasa", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Attack%20on%20Titan%20-%20Jiyuu%20no%20Tsubasa.mid"},
-    {name = "Demon Slayer", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Demon%20Slayer.mid.mid"},
-    {name = "Dragon Ball Z - CHA-LA HEAD-CHA-LA", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/CHA%20LA%20HEAD%20CHA%20LA%20%28Dragon%20Ball%20Z%29.mid"},
-    {name = "Hatsune Miku - Senbonzakura", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Hatsune%20Miku%20-%20Senbonzakura.mid"},
-    {name = "Touhou - Bad Apple", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Bad%20Apple.mid"},
-    {name = "Undertale - Megalovania", url = "https://raw.githubusercontent.com/KiyoEditz/Maestro/main/Undertale%20-%20Megalovania%20%28Remaster%20coming%20no%20soon%29.mid"},
-    {name = "Undertale - Hopes and Dreams", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Hopes%20and%20Dreams%20-%20Undertale%20%28WIP%29.mid"},
-    {name = "Undertale - Bergentruckung (Asgore)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Bergentruckung%20asgore%20theme%20%28original%20transcription%2C%20full%29.mid"},
-    {name = "OMORI - Duet", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/DUET%20%28OMORI%29.mid"},
-    {name = "DMC5 - Bury The Light", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Bury%20The%20Light%20%28DMC5%29.mid"},
-    {name = "Dark Souls - Gwyn, Lord of Cinder", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Gwyn%2C%20Lord%20of%20Cinder.mid.mid"},
-    {name = "Skyrim - Dragonborn Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Elder%20Scrolls%20V%20-%20Skyrim%20-%20Dragonborn%20Theme.mid"},
-    {name = "Hollow Knight - Mantis Lords", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Hollow%20Knight%20-%20Mantis%20Lords%20Theme.mid"},
-    {name = "Hollow Knight - Hornet", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Hollow%20Knight_%20Hornet.mid"},
-    {name = "Minecraft - Sweden", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/C418%20-%20Sweden.mid"},
-    {name = "Minecraft - Mice on Venus", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Mice%20on%20Venus%20-%20Minecraft.mid"},
-    {name = "Minecraft - Subwoofer Lullaby", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Subwoofer%20Lullaby-C418-%20Minecraft.mid"},
-    {name = "Minecraft - Aria Math", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Aria%20Math%20-%20C418.mid"},
-    {name = "Minecraft - Pigstep", url = "https://raw.githubusercontent.com/callmeyyzx/midi/main/Pigstep__Minecraft.mid"},
-    {name = "FNAF 1 Song - The Living Tombstone", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Five%20Nights%20At%20Freddy%27s%20-%20Living%20Tombstone.mid"},
-    {name = "Geometry Dash - Back on Track", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Back%20on%20Track%20Geometry%20dash.mid"},
-    {name = "Bad Piggies Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Bad%20Piggies%20-%20Main%20Theme%20by%20Funkfan.mid"},
-    {name = "Zelda OoT - Song of Storms", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/The%20Legend%20of%20Zelda%20Ocarina%20of%20Time%20-%20Song%20of%20Storms.mid"},
-    {name = "Super Mario Bros Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Mario%20Bros.%20-%20Super%20Mario%20Bros.%20Theme.mid"},
-    {name = "Super Mario 64 - Inside the Castle Walls", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Inside%20the%20Castle%20Walls%20-%20Super%20Mario%2064.mid"},
-    {name = "Tetris - A Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Tetris%20-%20A%20Theme.mid"},
-    {name = "Pokemon Center Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Pokemon%20-%20Pokemon%20Center%20Theme.mid"},
-    {name = "Wii - Mii Channel Theme", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Mii%20Channel%20Theme%20%28Pixel-Phil%29.mid"},
-    {name = "Harry Potter - Hedwig's Theme", url = "https://raw.githubusercontent.com/reality3d/3d-piano-player/master/midi/hedwigs_theme.mid"},
-    {name = "Pirates of the Caribbean - He's a Pirate", url = "https://raw.githubusercontent.com/reality3d/3d-piano-player/master/midi/hes_a_pirate.mid"},
-    {name = "Interstellar - Main Theme (Hans Zimmer)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Interstellar%20Main%20Theme-%20Hans%20Zimmer.mid"},
-    {name = "Inception - Time (Hans Zimmer)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Hans%20Zimmer%20-%20Time.mid"},
-    {name = "How to Train Your Dragon - Test Drive", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/How%20to%20train%20your%20dragon%20-%20Test%20Drive.mid"},
-    {name = "Star Wars - Duel of the Fates", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Duel%20of%20the%20Fates%20by%20John%20Williams.mid"},
-    {name = "Adele - Skyfall", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Adele%20-%20Skyfall.mid"},
-    {name = "Queen - Bohemian Rhapsody", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Bohemian-Rhapsody-1.mid"},
-    {name = "Coldplay - Viva La Vida", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Coldplay%20-%20Viva%20La%20Vida.mid"},
-    {name = "Coldplay - Clocks", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Coldplay%20-%20Clocks%20%28Full%20Song%29.mid"},
-    {name = "Billy Joel - Piano Man", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Billy%20Joel%20-%20Piano%20Man.mid"},
-    {name = "a-ha - Take On Me", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/A%20HA.Take%20on%20me%20K.mid"},
-    {name = "ABBA - Dancing Queen", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/ABBA%20-%20Dancing%20Queen.mid"},
-    {name = "Smash Mouth - All Star", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/All%20Star.mid"},
-    {name = "George Michael - Careless Whisper", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Careless-Whisper.mid"},
-    {name = "Astronomia (Coffin Dance)", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Coffin%20dance%20-%20Theme%20and%20variations.mid"},
-    {name = "Alan Walker - The Spectre", url = "https://raw.githubusercontent.com/callmeyyzx/midi/main/The_Spectre__Alan_Walker.mid"},
-    {name = "Avicii - Wake Me Up", url = "https://raw.githubusercontent.com/callmeyyzx/midi/main/wakemeup.mid"},
-    {name = "It's Just a Burning Memory", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/It%27s%20just%20a%20burning%20memory%20-%20A1.mid"},
-    {name = "Laufey - From The Start", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/From%20the%20start%20-%20Laufey.mid"},
-    {name = "Arctic Monkeys - 505", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/505%20-%20Arctic%20Monkeys.mid"},
-    {name = "Eminem - The Real Slim Shady", url = "https://raw.githubusercontent.com/thewildwestmidis/midis/main/Eminem%20-%20The%20Real%20Slim%20Shady.mid"},
-    {name = "Rick Astley - Never Gonna Give You Up", url = "https://raw.githubusercontent.com/callmeyyzx/midi/main/Never%20gonna%20give%20you%20up.mid"},
-}
+-- Safety net: if a MIDI file never sends a noteOff for a pressed key,
+-- release it after this many seconds instead of leaving the key stuck.
+local FALLBACK_HOLD_SECONDS = 6
+
+-- Fetch a string over HTTP with executor fallbacks (HttpGet / syn.get / http.get).
+local function httpGetString(url)
+    if game and game.HttpGet then
+        local ok, body = pcall(game.HttpGet, game, url)
+        if ok and type(body) == "string" then return body end
+    end
+    if syn and syn.get then
+        local ok, body = pcall(syn.get, url)
+        if ok and type(body) == "string" then return body end
+    end
+    if http and http.get then
+        local ok, body = pcall(http.get, url)
+        if ok and type(body) == "string" then return body end
+    end
+    error("No supported HTTP GET function available in this executor")
+end
 
 -- ==========================================
--- MIDI Stream & Parser
+-- Load UI library (Obsidian) & pure logic (core.lua)
+-- Both are wrapped in pcall: a failed load must produce a clear message
+-- instead of an opaque script error.
 -- ==========================================
-local function createStringStream(str)
-    return {
-        data = str,
-        pos = 1,
-        read = function(self, bytes)
-            if bytes == 0 then return "" end
-            if self.pos > #self.data then return nil end
-            local res = self.data:sub(self.pos, self.pos + bytes - 1)
-            self.pos = self.pos + bytes
-            return res
-        end,
-        seek = function(self, whence, offset)
-            if whence == "cur" then
-                self.pos = self.pos + offset
-            elseif whence == "set" then
-                self.pos = offset + 1
-            elseif whence == "end" then
-                self.pos = #self.data + offset + 1
-            end
-            return self.pos - 1
-        end
-    }
+local Library = nil
+local libraryLoadError = nil
+local okLibrary, result = pcall(function()
+    return loadstring(httpGetString(OBSIDIAN_LIBRARY_URL))()
+end)
+if okLibrary and type(result) == "table" then
+    Library = result
+else
+    libraryLoadError = result
 end
 
-local function read(stream, count)
-    local result = ""
-    while #result < count do
-        local r = stream:read(count - #result)
-        if not r or r == "" then error("missing value") end
-        result = result .. r
-    end
-    return result
+local Core = nil
+local coreLoadError = nil
+local okCore, coreResult = pcall(function()
+    return loadstring(httpGetString(CORE_LIBRARY_URL))()
+end)
+if okCore and type(coreResult) == "table" then
+    Core = coreResult
+else
+    coreLoadError = coreResult
 end
 
-local function readVLQ(stream)
-    local value = 0
-    local length = 0
-    repeat
-        local b = stream:read(1)
-        if not b then error("incomplete variable length quantity") end
-        local byte = b:byte()
-        value = bit32.lshift(value, 7)
-        value = bit32.bor(value, bit32.band(byte, 0x7F))
-        length = length + 1
-        if length > 4 then error("VLQ too long") end
-    until byte < 0x80
-    return value, length
+local function fatalLoadError(name, err)
+    warn(string.format("[Piano] Failed to load %s: %s", name, tostring(err)))
+    error(string.format(
+        "[Piano] Failed to load %s. Check your internet connection and that the "
+        .. "executor supports HTTP requests (HttpGet / syn.get).\n%s",
+        name, tostring(err)))
 end
 
-local midiEvent = {
-    [0x80] = function(stream, callback, channel, fb)
-        local key = fb:byte()
-        local velocity = read(stream, 1):byte()
-        callback("noteOff", channel, key, velocity / 0x7F)
-        return 2
-    end,
-    [0x90] = function(stream, callback, channel, fb)
-        local key = fb:byte()
-        local velocity = read(stream, 1):byte()
-        callback("noteOn", channel, key, velocity / 0x7F)
-        return 2
-    end,
-    [0xA0] = function(stream, callback, channel, fb)
-        local key = fb:byte()
-        local pressure = read(stream, 1):byte()
-        callback("keyPressure", channel, key, pressure / 0x7F)
-        return 2
-    end,
-    [0xB0] = function(stream, callback, channel, fb)
-        local number = fb:byte()
-        local value = read(stream, 1):byte()
-        if number < 120 then
-            callback("controller", channel, number, value)
-        else
-            callback("modeMessage", channel, number, value)
-        end
-        return 2
-    end,
-    [0xC0] = function(_, callback, channel, fb)
-        local program = fb:byte()
-        callback("program", channel, program)
-        return 1
-    end,
-    [0xD0] = function(_, callback, channel, fb)
-        local pressure = fb:byte()
-        callback("channelPressure", channel, pressure / 0x7F)
-        return 1
-    end,
-    [0xE0] = function(stream, callback, channel, fb)
-        local lsb = fb:byte()
-        local msb = read(stream, 1):byte()
-        callback("pitch", channel, (bit32.bor(lsb, bit32.lshift(msb, 7))) / 0x2000 - 1)
-        return 2
-    end
-}
-
-local function makeForwarder(name)
-    return function(data, callback)
-        callback(name, data)
-    end
-end
-
-local metaEvents = {
-    [0x00] = makeForwarder("sequenceNumber"),
-    [0x01] = makeForwarder("text"),
-    [0x02] = makeForwarder("copyright"),
-    [0x03] = makeForwarder("sequencerOrTrackName"),
-    [0x04] = makeForwarder("instrumentName"),
-    [0x05] = makeForwarder("lyric"),
-    [0x06] = makeForwarder("marker"),
-    [0x07] = makeForwarder("cuePoint"),
-    [0x20] = makeForwarder("channelPrefix"),
-    [0x2F] = makeForwarder("endOfTrack"),
-    [0x51] = function(data, callback)
-        if #data < 3 then return end
-        local b1, b2, b3 = string.byte(data, 1, 3)
-        local rawTempo = bit32.bor(bit32.lshift(b1, 16), bit32.lshift(b2, 8), b3)
-        callback("setTempo", rawTempo)
-    end,
-    [0x54] = makeForwarder("smpteOffset"),
-    [0x58] = function(data, callback)
-        if #data < 4 then return end
-        local numerator, denominator, metronome, dotted = string.byte(data, 1, 4)
-        callback("timeSignature", numerator, bit32.lshift(1, denominator), metronome, dotted)
-    end,
-    [0x59] = function(data, callback)
-        if #data < 2 then return end
-        local count, minor = string.byte(data, 1, 2)
-        if count >= 128 then count = count - 256 end
-        callback("keySignature", math.abs(count), count < 0 and "flat" or count > 0 and "sharp" or "C", minor == 0 and "major" or "minor")
-    end,
-    [0x7F] = makeForwarder("sequenceEvent")
-}
-
-local function metaEvent(stream, callback, fb)
-    local event = fb:byte()
-    local length, vlqLength = readVLQ(stream)
-    local data = read(stream, length)
-    local handler = metaEvents[event]
-    if handler then
-        handler(data, callback)
-    end
-    return 1 + vlqLength + length
-end
-
-local function readChunkInfo(stream)
-    local chunkInfo = stream:read(8)
-    if not chunkInfo or #chunkInfo < 8 then return false end
-    local magic = chunkInfo:sub(1, 4)
-    local len = string.unpack(">I4", chunkInfo:sub(5, 8))
-    return magic, len
-end
-
-local function readHeader(stream, callback, chunkLength)
-    local header = read(stream, chunkLength)
-    local format, tracks, division = string.unpack(">I2I2I2", header)
-    callback("header", format, tracks, division)
-    return format, tracks
-end
-
-local function processEvent(stream, callback, runningStatus)
-    local firstByte = stream:read(1)
-    if not firstByte then error("missing event") end
-    local status = firstByte:byte()
-    local length = 0
-
-    if status < 0x80 then
-        status = runningStatus
-        if not status then error("no running status") end
-    elseif status < 0xF0 then
-        firstByte = read(stream, 1)
-        length = 1
-        runningStatus = status
-    else
-        runningStatus = nil
-        if status == 0xF0 or status == 0xF7 then
-            local dataLen, vlqLen = readVLQ(stream)
-            local data = read(stream, dataLen)
-            callback("sysexEvent", data, status)
-            return 1 + vlqLen + dataLen, runningStatus
-        elseif status == 0xF2 then
-            read(stream, 2)
-            return 3, runningStatus
-        elseif status == 0xF3 then
-            read(stream, 1)
-            return 2, runningStatus
-        elseif status == 0xFF then
-            local metaType = read(stream, 1)
-            return 1 + metaEvent(stream, callback, metaType), runningStatus
-        else
-            callback("ignore", status)
-            return 1, runningStatus
-        end
-    end
-
-    local handler = midiEvent[bit32.band(status, 0xF0)]
-    if handler then
-        length = length + handler(stream, callback, bit32.band(status, 0x0F) + 1, firstByte)
-    end
-    return length, runningStatus
-end
-
-local function readTrack(stream, callback, chunkLength, track)
-    callback("track", track)
-    local chunkEnd = stream:seek("cur", 0) + chunkLength
-    local runningStatus
-    local ended = false
-
-    local function trackCallback(name, ...)
-        if name == "endOfTrack" then
-            ended = true
-        end
-        callback(name, ...)
-    end
-
-    while not ended and stream:seek("cur", 0) < chunkEnd do
-        local ticks = readVLQ(stream)
-        if ticks > 0 then trackCallback("deltatime", ticks) end
-        local _, nextRunningStatus = processEvent(stream, trackCallback, runningStatus)
-        runningStatus = nextRunningStatus
-    end
-    stream:seek("set", chunkEnd)
-end
-
-local function processMidi(stream, callback)
-    local tracks
-    local track = 0
-    while true do
-        local chunkType, chunkLength = readChunkInfo(stream)
-        if not chunkType then break end
-        if chunkType == "MThd" then
-            _, tracks = readHeader(stream, callback, chunkLength)
-        elseif chunkType == "MTrk" then
-            track = track + 1
-            readTrack(stream, callback, chunkLength, track)
-        else
-            stream:seek("cur", chunkLength)
-        end
-    end
-    return tracks
-end
+if not Library then fatalLoadError("Obsidian UI library", libraryLoadError) end
+if not Core then fatalLoadError("core.lua", coreLoadError) end
 
 -- ==========================================
 -- Virtual Piano Key Mapping & Input
 -- ==========================================
-local keys = "1!2@34$5%6^78*9(0qQwWeErtTyYuiIoOpPasSdDfgGhHjJklLzZxcCvVbBnm"
 local startNote = 36
 
 local digitKeyCodes = {
@@ -357,39 +102,125 @@ local shiftSymbolToDigit = {
     ["^"] = "6", ["&"] = "7", ["*"] = "8", ["("] = "9", [")"] = "0",
 }
 
+-- Two keyboard layouts. "full" maps 60 consecutive MIDI notes (36-95) to
+-- the full key string; "compact" maps one octave (12 white keys) so it
+-- fits a small screen, with octave transposition handled by Shift.
+local layouts = {
+    full = {
+        keyString = "1!2@34$5%6^78*9(0qQwWeErtTyYuiIoOpPasSdDfgGhHjJklLzZxcCvVbBnm",
+        count = 60,
+    },
+    compact = {
+        keyString = "1234qQwWeErtTyY",
+        count = 12,
+    },
+}
+
+local currentLayoutName = "full"
 local MidiToChar = {}
 local CharToKeyInfo = {}
+-- keyNote[keyEnum] = MIDI note currently held (for legato / voice stealing)
+local keyNote = {}
+-- activeVoices: list of {note, keyEnum, pressId, held} for voice stealing.
+local activeVoices = {}
+local voiceOrder = 0
 
-for i = 1, #keys do
-    local ch = keys:sub(i, i)
-    local isUpper = ch:upper() == ch and ch:lower() ~= ch
-    local mappedDigit = shiftSymbolToDigit[ch]
-    local needsShift = isUpper or (mappedDigit ~= nil)
-    local baseChar = mappedDigit or ch:upper()
-    local keyEnum = digitKeyCodes[baseChar] or Enum.KeyCode[baseChar]
+local function buildLayout(layoutName)
+    local layout = layouts[layoutName] or layouts.full
+    local keys = layout.keyString
 
-    MidiToChar[startNote + i - 1] = ch
-    CharToKeyInfo[ch] = {
-        keyEnum = keyEnum,
-        needsShift = needsShift,
-    }
+    MidiToChar = {}
+    CharToKeyInfo = {}
+
+    for i = 1, layout.count do
+        local ch = keys:sub(i, i)
+        local isUpper = ch:upper() == ch and ch:lower() ~= ch
+        local mappedDigit = shiftSymbolToDigit[ch]
+        local needsShift = isUpper or (mappedDigit ~= nil)
+        local baseChar = mappedDigit or ch:upper()
+        local keyEnum = digitKeyCodes[baseChar] or Enum.KeyCode[baseChar]
+
+        MidiToChar[startNote + i - 1] = ch
+        CharToKeyInfo[ch] = {
+            keyEnum = keyEnum,
+            needsShift = needsShift,
+            note = startNote + i - 1,
+        }
+    end
+
+    -- Re-seed held state so stale mappings don't linger across layouts.
+    for keyEnum, _ in pairs(keyNote) do
+        keyNote[keyEnum] = nil
+    end
+    for i = #activeVoices, 1, -1 do
+        local v = activeVoices[i]
+        if v and v.keyEnum then
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(false, v.keyEnum, false, game)
+            end)
+        end
+        activeVoices[i] = nil
+    end
 end
+
+buildLayout("full")
 
 local keyPressId = {}
 local keyHeld = {}
+-- activePress[keyEnum] = pressId of the press that is currently held,
+-- so a noteOff only releases the key if it belongs to the active press.
+local activePress = {}
 
-local function playChar(char)
+-- Voice / velocity configuration.
+local MAX_VOICES = 16
+local legatoMode = false
+local velocityMin = 0.2
+local velocityMax = 1.0
+local velocityCurve = 1.0 -- exponent applied to velocity before scaling
+
+-- Map an incoming 0..1 velocity through the configured curve and range.
+local function mapVelocity(velocity)
+    local v = math.clamp(velocity or 0.5, 0, 1)
+    -- Exponential curve: v^curve biases toward the low end when > 1.
+    if velocityCurve ~= 1 then
+        v = v ^ velocityCurve
+    end
+    return velocityMin + v * (velocityMax - velocityMin)
+end
+
+-- Steal the oldest active voice if we're at the voice ceiling.
+local function enforceVoiceLimit()
+    while #activeVoices >= MAX_VOICES do
+        local oldest = activeVoices[1]
+        if oldest and oldest.keyEnum then
+            if keyHeld[oldest.keyEnum] and activePress[oldest.keyEnum] == oldest.pressId then
+                VirtualInputManager:SendKeyEvent(false, oldest.keyEnum, false, game)
+                keyHeld[oldest.keyEnum] = false
+                activePress[oldest.keyEnum] = nil
+            end
+        end
+        table.remove(activeVoices, 1)
+    end
+end
+
+local function pressChar(char, velocity)
     local info = CharToKeyInfo[char]
     if not info or not info.keyEnum then return end
 
     local keyEnum = info.keyEnum
+    local mappedVel = mapVelocity(velocity)
+
     local pressId = (keyPressId[keyEnum] or 0) + 1
     keyPressId[keyEnum] = pressId
 
-    if keyHeld[keyEnum] then
+    -- Re-triggering the same key: in legato mode the previous press
+    -- sustains (overlap); otherwise release it first (re-articulation).
+    if keyHeld[keyEnum] and not legatoMode then
         VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
         keyHeld[keyEnum] = false
     end
+
+    enforceVoiceLimit()
 
     if info.needsShift then
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
@@ -397,20 +228,55 @@ local function playChar(char)
 
     VirtualInputManager:SendKeyEvent(true, keyEnum, false, game)
     keyHeld[keyEnum] = true
+    activePress[keyEnum] = pressId
+    keyNote[keyEnum] = info.note
+
+    -- Track this voice for stealing.
+    voiceOrder = voiceOrder + 1
+    table.insert(activeVoices, {
+        note = info.note,
+        keyEnum = keyEnum,
+        pressId = pressId,
+        order = voiceOrder,
+    })
 
     if info.needsShift then
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
     end
 
-    task.delay(0.02, function()
+    -- Safety net: if the file never sends a matching noteOff, release
+    -- after FALLBACK_HOLD_SECONDS. A real noteOff bumps keyPressId first,
+    -- which makes this delayed release a no-op.
+    -- Mapped velocity => hold length, so louder notes ring a bit longer.
+    local hold = FALLBACK_HOLD_SECONDS * (0.6 + 0.8 * math.clamp(mappedVel, 0, 1))
+    task.delay(hold, function()
         if keyPressId[keyEnum] == pressId and keyHeld[keyEnum] then
             VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
             keyHeld[keyEnum] = false
+            activePress[keyEnum] = nil
         end
     end)
 end
 
--- ==========================================
+local function releaseChar(char)
+    local info = CharToKeyInfo[char]
+    if not info or not info.keyEnum then return end
+
+    local keyEnum = info.keyEnum
+    if keyHeld[keyEnum] and activePress[keyEnum] == keyPressId[keyEnum] then
+        VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
+        keyHeld[keyEnum] = false
+        activePress[keyEnum] = nil
+        -- Drop the matching voice entry.
+        for i = #activeVoices, 1, -1 do
+            if activeVoices[i].keyEnum == keyEnum and activeVoices[i].pressId == keyPressId[keyEnum] then
+                table.remove(activeVoices, i)
+                break
+            end
+        end
+    end
+end
+
 -- ==========================================
 -- Playback State, Progress HUD State & Players
 -- ==========================================
@@ -431,19 +297,13 @@ local PlayerHudState = {
     draggingBar = false,
     dragPreviewTime = 0,
     replayFn = nil,
+    -- Next-note highlight: chars of the upcoming press event, or nil.
+    highlightNext = false,
+    nextNoteChars = nil,
 }
 
 local function formatDuration(seconds)
-    local sec = math.max(0, math.floor((tonumber(seconds) or 0) + 0.0001))
-    if sec >= 3600 then
-        local h = math.floor(sec / 3600)
-        local m = math.floor((sec % 3600) / 60)
-        local s = sec % 60
-        return string.format("%d:%02d:%02d", h, m, s)
-    end
-    local m = math.floor(sec / 60)
-    local s = sec % 60
-    return string.format("%d:%02d", m, s)
+    return Core.formatDuration(seconds)
 end
 
 local function setHudLoading(title, subtitle)
@@ -474,6 +334,7 @@ local function releaseHeldKeys()
         if held then
             keyPressId[keyEnum] = (keyPressId[keyEnum] or 0) + 1
             keyHeld[keyEnum] = false
+            activePress[keyEnum] = nil
             pcall(function()
                 VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
             end)
@@ -487,6 +348,7 @@ local function stopPlayback()
     PlayerHudState.paused = false
     PlayerHudState.seekTarget = nil
     PlayerHudState.currentTime = 0
+    PlayerHudState.nextNoteChars = nil
     if PlayerHudState.replayFn then
         PlayerHudState.status = "stopped"
     else
@@ -527,7 +389,132 @@ local function findEventIndexAtTime(events, targetTime)
     return ans
 end
 
-local function parseAndPlayMidi(midiString, myId, onStart, meta)
+-- ==========================================
+-- Shared playback engine
+-- ==========================================
+-- events: sorted table of {songTime, kind = "press"|"release", chars = {...}}
+-- press events may carry a "velocity" field.
+local function runEventPlayer(events, myId, onStart, totalDuration, meta)
+    if playbackId ~= myId then return false end
+
+    local songTitle = (meta and meta.title) or (PlayerHudState.status == "loading" and PlayerHudState.title) or "Song"
+    local songSubtitle = (meta and meta.subtitle) or (PlayerHudState.status == "loading" and PlayerHudState.subtitle) or "Player"
+
+    PlayerHudState.title = songTitle
+    PlayerHudState.subtitle = songSubtitle
+    PlayerHudState.currentTime = 0
+    PlayerHudState.totalTime = totalDuration
+    PlayerHudState.paused = false
+    PlayerHudState.seekTarget = nil
+    PlayerHudState.status = "playing"
+
+    playing = true
+    if onStart then
+        pcall(onStart)
+    end
+
+    local idx = 1
+    local nEvents = #events
+    local lastClock = tick()
+    local lastYieldClock = lastClock
+
+    while idx <= nEvents do
+        if not playing or playbackId ~= myId then break end
+
+        if PlayerHudState.seekTarget ~= nil then
+            local target = math.clamp(PlayerHudState.seekTarget, 0, totalDuration)
+            PlayerHudState.seekTarget = nil
+            releaseHeldKeys()
+            PlayerHudState.currentTime = target
+            idx = findEventIndexAtTime(events, target)
+            lastClock = tick()
+            lastYieldClock = lastClock
+        elseif PlayerHudState.paused then
+            releaseHeldKeys()
+            task.wait(0.04)
+            lastClock = tick()
+            lastYieldClock = lastClock
+        else
+            -- tick() is wall-clock time; it keeps advancing while the thread
+            -- is suspended in task.wait(), unlike os.clock() (CPU time).
+            local now = tick()
+            local dtReal = math.min(now - lastClock, 0.5)
+            lastClock = now
+            local speed = math.max(currentPlaybackSpeed, 0.05)
+            PlayerHudState.currentTime = math.min(totalDuration, PlayerHudState.currentTime + dtReal * speed)
+
+            local ev = events[idx]
+            if PlayerHudState.currentTime + 0.0005 >= ev.songTime then
+                while idx <= nEvents and PlayerHudState.currentTime + 0.0005 >= events[idx].songTime do
+                    if not playing or playbackId ~= myId or PlayerHudState.paused or PlayerHudState.seekTarget ~= nil then
+                        break
+                    end
+                    local curEv = events[idx]
+                    if curEv.kind == "press" then
+                        for _, char in ipairs(curEv.chars) do
+                            pressChar(char, curEv.velocity)
+                        end
+                    elseif curEv.kind == "release" then
+                        for _, char in ipairs(curEv.chars) do
+                            releaseChar(char)
+                        end
+                    end
+                    idx = idx + 1
+                    if tick() - lastYieldClock > 0.03 then
+                        task.wait()
+                        lastYieldClock = tick()
+                        lastClock = tick()
+                    end
+                end
+            else
+                -- Next-note highlight: peek at the upcoming press event so the
+                -- HUD can flash which keys are about to be played.
+                if PlayerHudState.highlightNext then
+                    local nextEv = nil
+                    for j = idx, nEvents do
+                        if events[j].kind == "press" then
+                            nextEv = events[j]
+                            break
+                        end
+                    end
+                    if nextEv then
+                        PlayerHudState.nextNoteChars = nextEv.chars
+                    else
+                        PlayerHudState.nextNoteChars = nil
+                    end
+                end
+
+                local songGap = ev.songTime - PlayerHudState.currentTime
+                local realWait = songGap / speed
+                local slice = math.min(realWait, 0.04)
+                if slice > 0.002 then
+                    task.wait(slice)
+                else
+                    task.wait()
+                end
+                lastYieldClock = tick()
+            end
+        end
+    end
+
+    if playbackId == myId then
+        playing = false
+        PlayerHudState.paused = false
+        if idx > nEvents then
+            PlayerHudState.currentTime = totalDuration
+            PlayerHudState.status = "finished"
+        elseif PlayerHudState.status ~= "stopped" then
+            PlayerHudState.status = "stopped"
+        end
+        releaseHeldKeys()
+    end
+    return true
+end
+
+-- ==========================================
+-- MIDI parsing & playback
+-- ==========================================
+local function parseAndPlayMidi(midiString, myId, onStart, meta, replayFn)
     if playbackId ~= myId then return false end
 
     local mthdIdx = midiString:find("MThd", 1, true)
@@ -543,14 +530,14 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta)
         midiString = midiString:sub(mthdIdx)
     end
 
-    local stream = createStringStream(midiString)
+    local stream = Core.createStringStream(midiString)
 
     local division = 96
     local events = {}
     local currentTime = 0
     local order = 0
 
-    local ok, err = pcall(processMidi, stream, function(name, ...)
+    local ok, err = pcall(Core.processMidi, stream, function(name, ...)
         if name == "header" then
             local _, _, div = ...
             division = div
@@ -564,10 +551,24 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta)
             -- Channel 10 (1-indexed) is General MIDI percussion; skip drum hits on piano
             if channel ~= 10 and velocity > 0 then
                 order = order + 1
-                table.insert(events, {time = currentTime, order = order, type = "note", key = key})
+                local char = MidiToChar[key]
+                if char then
+                    table.insert(events, {time = currentTime, order = order, kind = "press", chars = {char}, velocity = velocity})
+                end
+            end
+        elseif name == "noteOff" then
+            local channel, key = ...
+            if channel ~= 10 then
+                local char = MidiToChar[key]
+                if char then
+                    order = order + 1
+                    table.insert(events, {time = currentTime, order = order, kind = "release", chars = {char}})
+                end
             end
         elseif name == "setTempo" then
             local rawTempo = ...
+            -- Tempo events are kept in the timeline so the timestamp
+            -- precompute below can apply tempo changes at the right tick.
             if type(rawTempo) == "number" and rawTempo > 0 then
                 order = order + 1
                 table.insert(events, {time = currentTime, order = order, type = "tempo", tempo = rawTempo})
@@ -586,8 +587,13 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta)
 
     if playbackId ~= myId then return false end
 
+    -- At equal time, noteOff events sort before noteOn events so a
+    -- re-triggered key is released before it is pressed again.
     table.sort(events, function(a, b)
         if a.time == b.time then
+            if a.kind ~= b.kind then
+                return a.kind == "release"
+            end
             return a.order < b.order
         end
         return a.time < b.time
@@ -611,7 +617,7 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta)
         division = 96
     end
 
-    -- Precompute real song timestamps (at 1.0x speed) and active tempo for accurate progress & seeking
+    -- Precompute real song timestamps (at 1.0x speed) for progress & seeking
     local preTempo = 500000
     local prevTick = 0
     local songSec = 0
@@ -623,121 +629,37 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta)
             prevTick = ev.time
         end
         ev.songTime = songSec
-        ev.tempoBefore = preTempo
+        -- A tempo event applies from its own tick onward: events at the same
+        -- tick already got their delta computed with the previous tempo.
         if ev.type == "tempo" and ev.tempo > 0 then
             preTempo = ev.tempo
         end
     end
     local totalDuration = songSec
 
-    local songTitle = (meta and meta.title) or (PlayerHudState.status == "loading" and PlayerHudState.title) or "MIDI Song"
-    local songSubtitle = (meta and meta.subtitle) or (PlayerHudState.status == "loading" and PlayerHudState.subtitle) or "MIDI"
-    local replayMeta = {title = songTitle, subtitle = songSubtitle}
-
-    PlayerHudState.title = songTitle
-    PlayerHudState.subtitle = songSubtitle
-    PlayerHudState.currentTime = 0
-    PlayerHudState.totalTime = totalDuration
-    PlayerHudState.paused = false
-    PlayerHudState.seekTarget = nil
-    PlayerHudState.status = "playing"
-    PlayerHudState.replayFn = function()
-        stopPlayback()
-        local newId = playbackId
-        task.spawn(function()
-            parseAndPlayMidi(midiString, newId, nil, replayMeta)
-        end)
-    end
-
-    playing = true
-    if onStart then
-        pcall(onStart)
-    end
-
-    local idx = 1
-    local nEvents = #events
-    local lastClock = os.clock()
-    local lastYieldClock = lastClock
-
-    while idx <= nEvents do
-        if not playing or playbackId ~= myId then break end
-
-        if PlayerHudState.seekTarget ~= nil then
-            local target = math.clamp(PlayerHudState.seekTarget, 0, totalDuration)
-            PlayerHudState.seekTarget = nil
-            releaseHeldKeys()
-            PlayerHudState.currentTime = target
-            idx = findEventIndexAtTime(events, target)
-            lastClock = os.clock()
-            lastYieldClock = lastClock
-        elseif PlayerHudState.paused then
-            releaseHeldKeys()
-            task.wait(0.04)
-            lastClock = os.clock()
-            lastYieldClock = lastClock
-        else
-            local now = os.clock()
-            local dtReal = math.min(now - lastClock, 0.5)
-            lastClock = now
-            local speed = math.max(currentPlaybackSpeed, 0.05)
-            PlayerHudState.currentTime = math.min(totalDuration, PlayerHudState.currentTime + dtReal * speed)
-
-            local ev = events[idx]
-            if PlayerHudState.currentTime + 0.0005 >= ev.songTime then
-                while idx <= nEvents and PlayerHudState.currentTime + 0.0005 >= events[idx].songTime do
-                    if not playing or playbackId ~= myId or PlayerHudState.paused or PlayerHudState.seekTarget ~= nil then
-                        break
-                    end
-                    local curEv = events[idx]
-                    if curEv.type == "note" then
-                        local char = MidiToChar[curEv.key]
-                        if char then
-                            playChar(char)
-                        end
-                    end
-                    idx = idx + 1
-                    if os.clock() - lastYieldClock > 0.03 then
-                        task.wait()
-                        lastYieldClock = os.clock()
-                        lastClock = os.clock()
-                    end
-                end
-            else
-                local songGap = ev.songTime - PlayerHudState.currentTime
-                local realWait = songGap / speed
-                local slice = math.min(realWait, 0.04)
-                if slice > 0.002 then
-                    task.wait(slice)
-                else
-                    task.wait()
-                end
-                lastYieldClock = os.clock()
-            end
-        end
-    end
-
-    if playbackId == myId then
-        playing = false
-        PlayerHudState.paused = false
-        if idx > nEvents then
-            PlayerHudState.currentTime = totalDuration
-            PlayerHudState.status = "finished"
-        elseif PlayerHudState.status ~= "stopped" then
-            PlayerHudState.status = "stopped"
-        end
-        releaseHeldKeys()
-    end
-    return true
+    PlayerHudState.replayFn = replayFn
+    return runEventPlayer(events, myId, onStart, totalDuration, meta)
 end
 
-local function playTextSheet(sheet, bpm, myId, meta)
-    if playbackId ~= myId then return end
+-- ==========================================
+-- Text sheets
+-- ==========================================
+local function playTextSheet(sheet, bpm, myId, meta, replayFn)
+    if playbackId ~= myId then return false end
 
     local baseStep = 60 / math.max(tonumber(bpm) or 120, 1) / 2
     local events = {}
     local songSec = 0
     local i = 1
     local len = #sheet
+
+    local function emitPress(chars)
+        table.insert(events, {songTime = songSec, kind = "press", chars = chars, velocity = 0.7})
+        -- Synthetic release shortly after the press (text sheets have no
+        -- noteOff events; this gives a natural staccato feel).
+        local hold = math.min(baseStep * 0.7, 0.2)
+        table.insert(events, {songTime = songSec + hold, kind = "release", chars = chars})
+    end
 
     while i <= len do
         local ch = sheet:sub(i, i)
@@ -746,15 +668,19 @@ local function playTextSheet(sheet, bpm, myId, meta)
             if closeIdx then
                 local group = sheet:sub(i + 1, closeIdx - 1)
                 if group:find(" ") then
+                    -- Arpeggio: each character is played in sequence.
                     for j = 1, #group do
                         local gc = group:sub(j, j)
                         if CharToKeyInfo[gc] then
-                            table.insert(events, {songTime = songSec, chars = {gc}})
-                            songSec = songSec + math.min(baseStep * 0.35, 0.06)
+                            table.insert(events, {songTime = songSec, kind = "press", chars = {gc}, velocity = 0.7})
+                            local hold = math.min(baseStep * 0.35, 0.06)
+                            table.insert(events, {songTime = songSec + hold, kind = "release", chars = {gc}})
+                            songSec = songSec + hold
                         end
                     end
                     songSec = songSec + baseStep * 0.5
                 else
+                    -- Chord: all characters are pressed simultaneously.
                     local chord = {}
                     for j = 1, #group do
                         local gc = group:sub(j, j)
@@ -763,7 +689,7 @@ local function playTextSheet(sheet, bpm, myId, meta)
                         end
                     end
                     if #chord > 0 then
-                        table.insert(events, {songTime = songSec, chars = chord})
+                        emitPress(chord)
                     end
                     songSec = songSec + baseStep
                 end
@@ -775,7 +701,7 @@ local function playTextSheet(sheet, bpm, myId, meta)
             songSec = songSec + baseStep
             i = i + 1
         elseif CharToKeyInfo[ch] then
-            table.insert(events, {songTime = songSec, chars = {ch}})
+            emitPress({ch})
             songSec = songSec + baseStep
             i = i + 1
         else
@@ -783,114 +709,33 @@ local function playTextSheet(sheet, bpm, myId, meta)
         end
     end
 
-    local totalDuration = songSec
-    local songTitle = (meta and meta.title) or ("Text Sheet (" .. tostring(bpm) .. " BPM)")
-    local songSubtitle = (meta and meta.subtitle) or "Text Sheet"
-    local replayMeta = {title = songTitle, subtitle = songSubtitle}
-
-    PlayerHudState.title = songTitle
-    PlayerHudState.subtitle = songSubtitle
-    PlayerHudState.currentTime = 0
-    PlayerHudState.totalTime = totalDuration
-    PlayerHudState.paused = false
-    PlayerHudState.seekTarget = nil
-    PlayerHudState.status = "playing"
-    PlayerHudState.replayFn = function()
-        stopPlayback()
-        local newId = playbackId
-        task.spawn(playTextSheet, sheet, bpm, newId, replayMeta)
-    end
-
-    playing = true
-    local idx = 1
-    local nEvents = #events
-    local lastClock = os.clock()
-    local lastYieldClock = lastClock
-
-    while idx <= nEvents do
-        if not playing or playbackId ~= myId then break end
-
-        if PlayerHudState.seekTarget ~= nil then
-            local target = math.clamp(PlayerHudState.seekTarget, 0, totalDuration)
-            PlayerHudState.seekTarget = nil
-            releaseHeldKeys()
-            PlayerHudState.currentTime = target
-            idx = findEventIndexAtTime(events, target)
-            lastClock = os.clock()
-            lastYieldClock = lastClock
-        elseif PlayerHudState.paused then
-            releaseHeldKeys()
-            task.wait(0.04)
-            lastClock = os.clock()
-            lastYieldClock = lastClock
-        else
-            local now = os.clock()
-            local dtReal = math.min(now - lastClock, 0.5)
-            lastClock = now
-            local speed = math.max(currentPlaybackSpeed, 0.05)
-            PlayerHudState.currentTime = math.min(totalDuration, PlayerHudState.currentTime + dtReal * speed)
-
-            local ev = events[idx]
-            if PlayerHudState.currentTime + 0.0005 >= ev.songTime then
-                while idx <= nEvents and PlayerHudState.currentTime + 0.0005 >= events[idx].songTime do
-                    if not playing or playbackId ~= myId or PlayerHudState.paused or PlayerHudState.seekTarget ~= nil then
-                        break
-                    end
-                    for _, gc in ipairs(events[idx].chars) do
-                        playChar(gc)
-                    end
-                    idx = idx + 1
-                    if os.clock() - lastYieldClock > 0.03 then
-                        task.wait()
-                        lastYieldClock = os.clock()
-                        lastClock = os.clock()
-                    end
-                end
-            else
-                local songGap = ev.songTime - PlayerHudState.currentTime
-                local realWait = songGap / speed
-                local slice = math.min(realWait, 0.04)
-                if slice > 0.002 then
-                    task.wait(slice)
-                else
-                    task.wait()
-                end
-                lastYieldClock = os.clock()
+    table.sort(events, function(a, b)
+        if a.songTime == b.songTime then
+            if a.kind ~= b.kind then
+                return a.kind == "release"
             end
+            return false
         end
-    end
+        return a.songTime < b.songTime
+    end)
 
-    if playbackId == myId then
-        playing = false
-        PlayerHudState.paused = false
-        if idx > nEvents then
-            PlayerHudState.currentTime = totalDuration
-            PlayerHudState.status = "finished"
-        elseif PlayerHudState.status ~= "stopped" then
-            PlayerHudState.status = "stopped"
-        end
-        releaseHeldKeys()
-    end
+    local totalDuration = songSec
+    PlayerHudState.replayFn = replayFn
+    return runEventPlayer(events, myId, nil, totalDuration, meta)
 end
 
 -- ==========================================
--- Rayfield UI
+-- Rayfield -> Obsidian UI
 -- ==========================================
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
-local Window = Rayfield:CreateWindow({
-    Name = "🎹 Universal Piano",
-    LoadingTitle = "Loading Notes...",
-    LoadingSubtitle = "by Swazi",
-    ToggleUIKeybind = Enum.KeyCode.Quote,
-    ConfigurationSaving = {Enabled = false},
-    KeySystem = false
-})
-
-local QuickTab = Window:CreateTab("Quick Picks & URL", 4483362458)
-local LocalTab = Window:CreateTab("Local & Sheets", 4483362458)
-local NanoTab = Window:CreateTab("NanoMIDI API", 4483362458)
-local ExternalTab = Window:CreateTab("MuseScore & MidiShow", 4483362458)
-local GlobalTab = Window:CreateTab("🔍 Global Search", 4483362458)
+local function notify(title, content, duration)
+    pcall(function()
+        Library:Notify({
+            Title = tostring(title),
+            Description = tostring(content),
+            Time = duration or 3,
+        })
+    end)
+end
 
 -- ==========================================
 -- HTTP, Search & Auto-Load Helpers
@@ -898,34 +743,19 @@ local GlobalTab = Window:CreateTab("🔍 Global Search", 4483362458)
 local httpRequest = request or http_request or (syn and syn.request) or (http and http.request)
 local MAX_DROPDOWN_ITEMS = 200
 
+-- Tunable network policy. Declared here (before the fetch helpers) so every
+-- fetch path reads the live values; the Network Tuning UI sliders update it.
+local NetworkConfig = {
+    maxAttempts = 3,
+    retryDelay = 1.5,
+}
+
 local function normalizeMidiUrl(url)
-    local clean = tostring(url or ""):match("^%s*(.-)%s*$")
-    clean = clean:gsub("^https?://github%.com/([^/]+)/([^/]+)/blob/(.+)$", "https://raw.githubusercontent.com/%1/%2/%3")
-    clean = clean:gsub("^https?://github%.com/([^/]+)/([^/]+)/raw/(.+)$", "https://raw.githubusercontent.com/%1/%2/%3")
-    clean = clean:gsub(" ", "%%20")
-    return clean
+    return Core.normalizeMidiUrl(url)
 end
 
 local function buildRepoUrlCandidates(rawUrl)
-    local clean = normalizeMidiUrl(rawUrl)
-    local candidates = {}
-    local seen = {}
-    local function add(u)
-        if u and u ~= "" and not seen[u] then
-            seen[u] = true
-            table.insert(candidates, u)
-        end
-    end
-
-    add(clean)
-    if clean:find("raw%.githubusercontent%.com/[^/]+/[^/]+/refs/heads/") then
-        add((clean:gsub("(raw%.githubusercontent%.com/[^/]+/[^/]+)/refs/heads/", "%1/")))
-    elseif clean:find("raw%.githubusercontent%.com/[^/]+/[^/]+/main/") then
-        add((clean:gsub("(raw%.githubusercontent%.com/[^/]+/[^/]+)/main/", "%1/refs/heads/main/")))
-    elseif clean:find("raw%.githubusercontent%.com/[^/]+/[^/]+/master/") then
-        add((clean:gsub("(raw%.githubusercontent%.com/[^/]+/[^/]+)/master/", "%1/refs/heads/master/")))
-    end
-    return candidates
+    return Core.buildRepoUrlCandidates(rawUrl)
 end
 
 local function safeRequest(url, customHeaders, method, requestBody)
@@ -994,6 +824,10 @@ local function getResponseHeader(res, name)
 end
 
 local function requestWithRetry(url, customHeaders, maxAttempts, retryDelay, shouldAbort, method, requestBody)
+    -- Allow callers to omit the retry policy; fall back to the live tunable
+    -- NetworkConfig so the UI sliders affect every fetch path.
+    if maxAttempts == nil then maxAttempts = NetworkConfig.maxAttempts end
+    if retryDelay == nil then retryDelay = NetworkConfig.retryDelay end
     maxAttempts = maxAttempts or 3
     retryDelay = retryDelay or 1.0
     local lastErr = "Unknown error"
@@ -1026,7 +860,7 @@ local function requestWithRetry(url, customHeaders, maxAttempts, retryDelay, sho
 end
 
 local function fetchMidiBytesWithRetry(url, customHeaders, shouldAbort)
-    local ok, res, err, status = requestWithRetry(url, customHeaders, 3, 0.75, shouldAbort)
+    local ok, res, err, status = requestWithRetry(url, customHeaders, nil, nil, shouldAbort)
     if not ok then
         return false, nil, err, status
     end
@@ -1037,270 +871,64 @@ local function fetchMidiBytesWithRetry(url, customHeaders, shouldAbort)
     return true, body, nil, status
 end
 
-local function matchesQuery(label, query)
-    local clean = tostring(query or ""):lower():match("^%s*(.-)%s*$")
-    if clean == "" then
-        return true
-    end
-    local lowerLabel = tostring(label or ""):lower()
-    for token in clean:gmatch("%S+") do
-        if not lowerLabel:find(token, 1, true) then
-            return false
-        end
-    end
-    return true
-end
-
-local function filterSongList(sourceList, query, limit)
-    local matches = {}
-    local totalMatches = 0
-    for _, item in ipairs(sourceList) do
-        if matchesQuery(item, query) then
-            totalMatches = totalMatches + 1
-            if not limit or #matches < limit then
-                table.insert(matches, item)
-            end
-        end
-    end
-    return matches, totalMatches
-end
-
-local function setDropdownOptions(dropdown, options, fallbackText, setSuppress)
-    local display = options
-    local hasItems = #options > 0
-    if not hasItems then
-        display = {fallbackText or "No matching songs"}
-    end
-
-    if setSuppress then setSuppress(true) end
-    pcall(function()
-        dropdown:Refresh(display)
-        dropdown:Set({display[1]})
-    end)
-    if setSuppress then setSuppress(false) end
-
-    return hasItems and display[1] or nil
-end
-
-local function setLabelSafe(labelObj, text)
-    if labelObj and labelObj.Set then
-        pcall(function()
-            labelObj:Set(text)
-        end)
-    end
-end
-
-local function encodeUrlPath(str)
-    return (str:gsub("([^%w%-%._~/])", function(c)
-        return string.format("%%%02X", c:byte())
-    end))
-end
-
-local function encodeQueryParam(str)
-    return (tostring(str or ""):gsub("([^%w%-%._~])", function(c)
-        return string.format("%%%02X", c:byte())
-    end))
-end
-
-local function decodeHtmlEntities(str)
-    local s = tostring(str or "")
-    s = s:gsub("&amp;", "&")
-    s = s:gsub("&quot;", '"')
-    s = s:gsub("&#0?39;", "'")
-    s = s:gsub("&#x27;", "'")
-    s = s:gsub("&apos;", "'")
-    s = s:gsub("&lt;", "<")
-    s = s:gsub("&gt;", ">")
-    s = s:gsub("&nbsp;", " ")
-    return s
-end
-
-local function stripHtmlTags(str)
-    return decodeHtmlEntities(tostring(str or ""):gsub("<[^>]->", " ")):gsub("%s+", " "):match("^%s*(.-)%s*$")
-end
-
-local MD5_K = {
-    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
-    0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
-    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
-    0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
-    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
-    0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
-    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-    0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
-    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
-    0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
-    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
-    0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
-    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
-    0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
-    0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+-- ==========================================
+-- Shared State Tables
+-- (Declared before the fetch functions below so those functions capture
+-- these as upvalues rather than resolving them as globals at call time.)
+-- ==========================================
+local QuickState = {
+    map = {},
+    order = {},
+    filtered = {},
+    totalMatches = 0,
+    query = "",
+    selected = nil,
+    repoUrl = QUICKPICKS_REPO_URL,
+    sourceLabel = "GitHub Repo",
+    autoPlayOnSelect = false,
+    suppressCallback = false,
+    verifying = false,
+    verifyAbort = false,
+    verifyFailures = {},
+    fetchGeneration = 0,
+    statusActive = false,
 }
 
-local MD5_S = {
-    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-    5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
-    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+local LocalState = {
+    files = {},
+    order = {},
+    query = "",
+    selected = nil,
+    autoPlayOnSelect = false,
+    suppressCallback = false,
 }
 
-local function md5Hex(msg)
-    msg = tostring(msg or "")
-    local origBitLen = #msg * 8
-    msg = msg .. "\128"
-    local padLen = (56 - (#msg % 64)) % 64
-    if padLen > 0 then
-        msg = msg .. string.rep("\0", padLen)
-    end
-    local loLen = origBitLen % 4294967296
-    local hiLen = math.floor(origBitLen / 4294967296) % 4294967296
-    msg = msg .. string.pack("<I4I4", loLen, hiLen)
+local NanoState = {
+    headers = {
+        ["Accept"] = "application/json, */*",
+        ["Origin"] = "https://nanomidi.net",
+        ["Referer"] = "https://nanomidi.net/",
+    },
+    apiData = {},
+    order = {},
+    query = "",
+    selected = nil,
+    loaded = false,
+    loadingList = false,
+    autoPlayOnSelect = false,
+    suppressCallback = false,
+}
 
-    local a0, b0, c0, d0 = 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476
-    local band, bor, bxor, bnot = bit32.band, bit32.bor, bit32.bxor, bit32.bnot
-    local lshift, rshift = bit32.lshift, bit32.rshift
-
-    for offset = 1, #msg, 64 do
-        local M = {}
-        for j = 0, 15 do
-            local idx = offset + j * 4
-            M[j] = string.unpack("<I4", msg, idx)
-        end
-
-        local A, B, C, D = a0, b0, c0, d0
-        for i = 1, 64 do
-            local F, g
-            if i <= 16 then
-                F = bor(band(B, C), band(bnot(B), D))
-                g = i - 1
-            elseif i <= 32 then
-                F = bor(band(D, B), band(bnot(D), C))
-                g = (5 * (i - 1) + 1) % 16
-            elseif i <= 48 then
-                F = bxor(B, bxor(C, D))
-                g = (3 * (i - 1) + 5) % 16
-            else
-                F = bxor(C, bor(B, bnot(D)))
-                g = (7 * (i - 1)) % 16
-            end
-
-            local sum = (F + A + MD5_K[i] + M[g]) % 4294967296
-            local s = MD5_S[i]
-            local rot = bor(lshift(sum, s), rshift(sum, 32 - s))
-            A = D
-            D = C
-            C = B
-            B = (B + rot) % 4294967296
-        end
-
-        a0 = (a0 + A) % 4294967296
-        b0 = (b0 + B) % 4294967296
-        c0 = (c0 + C) % 4294967296
-        d0 = (d0 + D) % 4294967296
-    end
-
-    local raw = string.pack("<I4I4I4I4", a0, b0, c0, d0)
-    return (raw:gsub(".", function(c)
-        return string.format("%02x", c:byte())
-    end))
-end
-
-local function hexToStr(hexStr)
-    local clean = tostring(hexStr or ""):gsub("^W/", ""):gsub('"', ""):gsub("%s+", "")
-    local out = {}
-    for i = 1, #clean - 1, 2 do
-        local pair = clean:sub(i, i + 1)
-        if pair == "00" then break end
-        local b = tonumber(pair, 16)
-        if not b then break end
-        table.insert(out, string.char(b))
-    end
-    return table.concat(out)
-end
-
-local function decodeCustomBase64(encoded, alphabet)
-    if type(encoded) ~= "string" or type(alphabet) ~= "string" or #alphabet < 64 then
-        return ""
-    end
-    local clean = encoded:gsub("%s+", "")
-    local map = {}
-    for i = 1, 64 do
-        map[alphabet:sub(i, i)] = i - 1
-    end
-    local padChar = #alphabet >= 65 and alphabet:sub(65, 65) or "="
-    map[padChar] = 64
-
-    local bor, band, lshift, rshift = bit32.bor, bit32.band, bit32.lshift, bit32.rshift
-    local out = {}
-    for i = 1, #clean, 4 do
-        local c1 = map[clean:sub(i, i)]
-        local c2 = map[clean:sub(i + 1, i + 1)]
-        local c3 = map[clean:sub(i + 2, i + 2)] or 64
-        local c4 = map[clean:sub(i + 3, i + 3)] or 64
-        if c1 ~= nil and c2 ~= nil and c1 < 64 and c2 < 64 then
-            local b1 = bor(lshift(c1, 2), rshift(c2, 4))
-            table.insert(out, string.char(band(b1, 0xFF)))
-            if c3 < 64 then
-                local b2 = bor(lshift(band(c2, 0x0F), 4), rshift(c3, 2))
-                table.insert(out, string.char(band(b2, 0xFF)))
-                if c4 < 64 then
-                    local b3 = bor(lshift(band(c3, 0x03), 6), c4)
-                    table.insert(out, string.char(band(b3, 0xFF)))
-                end
-            end
-        end
-    end
-    return table.concat(out)
-end
-
-local function mergeCookieStrings(existing, setCookieHeader)
-    local jar = {}
-    local order = {}
-    local function addPair(name, val)
-        if name ~= "" and val ~= nil then
-            if jar[name] == nil then
-                table.insert(order, name)
-            end
-            jar[name] = val
-        end
-    end
-
-    if type(existing) == "string" and existing ~= "" then
-        for part in existing:gmatch("[^;]+") do
-            local k, v = part:match("^%s*([^=]+)=(.-)%s*$")
-            if k then addPair(k, v) end
-        end
-    end
-
-    if type(setCookieHeader) == "string" and setCookieHeader ~= "" then
-        for chunk in setCookieHeader:gmatch("[^,\r\n]+") do
-            local firstPart = chunk:match("^%s*([^;]+)")
-            if firstPart then
-                local k, v = firstPart:match("^([^=]+)=(.*)$")
-                local lowerK = k and k:lower() or ""
-                if k and lowerK ~= "expires" and lowerK ~= "path" and lowerK ~= "domain" and lowerK ~= "max-age" and lowerK ~= "samesite" then
-                    addPair(k, v)
-                end
-            end
-        end
-    end
-
-    local out = {}
-    for _, k in ipairs(order) do
-        table.insert(out, k .. "=" .. jar[k])
-    end
-    return table.concat(out, "; ")
-end
-
-local function formatArtists(artists)
-    if type(artists) == "table" then
-        return table.concat(artists, ", ")
-    elseif artists ~= nil then
-        return tostring(artists)
-    end
-    return "Unknown"
-end
+local GlobalState = {
+    resultsMap = {},
+    resultsOrder = {},
+    totalMatches = 0,
+    query = "",
+    selected = nil,
+    suppressCallback = false,
+    statusActive = false,
+    liveExternalSearch = true,
+}
 
 local MuseState = {
     map = {},
@@ -1328,52 +956,41 @@ local MidiShowState = {
     statusActive = false,
 }
 
+-- Playback history: recent plays with a replay closure. Each entry keeps
+-- only the small source strings (title, source, replayFn), never the MIDI
+-- payload, so the list stays lightweight (item 14: memory hygiene).
+local HistoryState = {
+    entries = {}, -- newest first: {title, source, replayFn}
+    maxSize = 25,
+    suppressCallback = false,
+}
+
+local function recordHistory(title, source, replayFn)
+    table.insert(HistoryState.entries, 1, {
+        title = tostring(title or "Unknown"),
+        source = tostring(source or "Unknown"),
+        replayFn = replayFn,
+    })
+    while #HistoryState.entries > HistoryState.maxSize do
+        table.remove(HistoryState.entries)
+    end
+end
+
+local refreshGlobalSearchResults -- forward declaration
 local runMuseSearch -- forward declaration
 local runMidiShowSearch -- forward declaration
 
-local function isMuseScoreUrl(url)
-    local clean = tostring(url or ""):lower()
-    return clean:find("musescore.com/", 1, true) ~= nil
-end
-
-local function isMidiShowUrl(url)
-    local clean = tostring(url or ""):lower()
-    return clean:find("midishow.com/", 1, true) ~= nil or clean:find("midishow.net/", 1, true) ~= nil
-end
-
-local function normalizeMuseScoreInput(input)
-    local clean = tostring(input or ""):match("^%s*(.-)%s*$")
-    if clean == "" then return nil end
-    if clean:match("^%d+$") then
-        return "https://musescore.com/scores/" .. clean
-    end
-    clean = clean:gsub("#.*$", "")
-    if not clean:match("^https?://") and clean:lower():find("musescore%.com") then
-        clean = "https://" .. clean
-    end
-    return clean
-end
-
-local function normalizeMidiShowInput(input)
-    local clean = tostring(input or ""):match("^%s*(.-)%s*$")
-    if clean == "" then return nil end
-    if clean:match("^%d+$") then
-        return "https://www.midishow.com/en/midi/" .. clean .. ".html"
-    end
-    clean = clean:gsub("#.*$", "")
-    if not clean:match("^https?://") and clean:lower():find("midishow%.com") then
-        clean = "https://" .. clean
-    end
-    local dlId = clean:match("midishow%.com/[^/]-/?midi/download%?id=(%d+)") or clean:match("midishow%.com/midi/download%?id=(%d+)")
-    if dlId then
-        return "https://www.midishow.com/en/midi/" .. dlId .. ".html"
-    end
-    return clean
-end
-
+-- ==========================================
+-- MuseScore & MidiShow fetching
+-- NOTE: Both sites are scraped because they expose no public MIDI API.
+-- The extraction logic below is reverse-engineered and inherently brittle:
+-- if either site changes its markup/payloads, the relevant function must be
+-- updated. Error strings always include the failing stage to make that
+-- easier to diagnose.
+-- ==========================================
 local function fetchMuseScoreMidi(rawInput, shouldAbort)
-    local scoreUrl = normalizeMuseScoreInput(rawInput)
-    if not scoreUrl or not isMuseScoreUrl(scoreUrl) then
+    local scoreUrl = Core.normalizeMuseScoreInput(rawInput)
+    if not scoreUrl or not Core.isMuseScoreUrl(scoreUrl) then
         return false, nil, "Invalid MuseScore URL or ID"
     end
 
@@ -1401,6 +1018,10 @@ local function fetchMuseScoreMidi(rawInput, shouldAbort)
         return false, nil, "Could not find MuseScore score ID"
     end
 
+    -- The jmuse API requires a 4-hex-char auth prefix: md5(scoreId .. "midi0"
+    -- .. suffix) truncated to 4 chars, where suffix identifies the MIDI
+    -- build. The suffix is scraped from MuseScore's production JS bundles
+    -- (their build hash changes over time), with a hardcoded fallback.
     local suffixCandidates = {}
     local seenSuffix = {}
     local function addSuffix(s)
@@ -1458,6 +1079,7 @@ local function fetchMuseScoreMidi(rawInput, shouldAbort)
         end
     end
 
+    -- Fallback suffix observed on MuseScore's current build.
     addSuffix("9654,4e")
 
     local lastErr = "MuseScore API rejected MIDI request"
@@ -1465,7 +1087,7 @@ local function fetchMuseScoreMidi(rawInput, shouldAbort)
         if shouldAbort and shouldAbort() then
             return false, nil, "Aborted"
         end
-        local auth = md5Hex(tostring(scoreId) .. "midi0" .. suffix):sub(1, 4)
+        local auth = Core.md5Hex(tostring(scoreId) .. "midi0" .. suffix):sub(1, 4)
         local apiUrl = "https://musescore.com/api/jmuse?id=" .. tostring(scoreId) .. "&type=midi&index=0"
         local apiOk, apiRes, apiErr, status = requestWithRetry(apiUrl, {
             ["Accept"] = "application/json, */*",
@@ -1503,7 +1125,7 @@ local function searchMuseScore(query)
         return false, nil, "Enter a search query"
     end
 
-    local searchUrl = "https://musescore.com/sheetmusic?text=" .. encodeQueryParam(cleanQuery)
+    local searchUrl = "https://musescore.com/sheetmusic?text=" .. Core.encodeQueryParam(cleanQuery)
     local ok, res, err = requestWithRetry(searchUrl, {
         ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         ["Accept-Language"] = "en-US,en;q=0.9",
@@ -1514,7 +1136,7 @@ local function searchMuseScore(query)
     end
 
     local html = getResponseBody(res) or ""
-    local decodedHtml = decodeHtmlEntities(html)
+    local decodedHtml = Core.decodeHtmlEntities(html)
     local results = {}
     local seenIds = {}
 
@@ -1527,7 +1149,7 @@ local function searchMuseScore(query)
         local scoreId = cleanUrl:match("/scores/(%d+)")
         if not scoreId or seenIds[scoreId] then return end
         seenIds[scoreId] = true
-        local cleanTitle = stripHtmlTags(title)
+        local cleanTitle = Core.stripHtmlTags(title)
         if cleanTitle == "" then
             cleanTitle = "Score #" .. scoreId
         end
@@ -1568,8 +1190,8 @@ local function searchMuseScore(query)
 end
 
 local function fetchMidiShowMidi(rawInput, shouldAbort)
-    local pageUrl = normalizeMidiShowInput(rawInput)
-    if not pageUrl or not isMidiShowUrl(pageUrl) then
+    local pageUrl = Core.normalizeMidiShowInput(rawInput)
+    if not pageUrl or not Core.isMidiShowUrl(pageUrl) then
         return false, nil, "Invalid MidiShow URL or ID"
     end
 
@@ -1612,23 +1234,29 @@ local function fetchMidiShowMidi(rawInput, shouldAbort)
         return false, nil, "MidiShow blocked by Cloudflare challenge (paste browser Cookie in MuseScore & MidiShow tab)"
     end
 
-    local setCookie = getResponseHeader(pageRes, "set-cookie")
-    cookieHeader = mergeCookieStrings(cookieHeader, setCookie)
+    cookieHeader = Core.mergeCookieStrings(cookieHeader, getResponseHeader(pageRes, "set-cookie"))
 
     local csrfToken = html:match('<meta[^>]-name=["\']csrf%-token["\'][^>]-content=["\']([^"\']+)["\']')
         or html:match('<meta[^>]-content=["\']([^"\']+)["\'][^>]-name=["\']csrf%-token["\']')
     local midiId = html:match('data%-id=["\'](%d+)["\']')
         or pageUrl:match("/(%d+)%.html")
-        or pageUrl:match("%-(%d+)/?$")
+        or pageUrl:match("-(%d+)/?$")
         or pageUrl:match("[?&]id=(%d+)")
     local dataMid = html:match('data%-mid=["\']([^"\']+)["\']')
     if dataMid then
-        dataMid = decodeHtmlEntities(dataMid)
+        dataMid = Core.decodeHtmlEntities(dataMid)
     end
 
     local lastErr = "Could not extract MidiShow MIDI data"
 
     if midiId and csrfToken and dataMid then
+        -- MidiShow serves the MIDI in three obfuscated parts:
+        --   1. body1 (new-file POST response): bytes 29..56 (28 chars) and 1..28 (28 chars)
+        --   2. body2 (the .js chunk referenced by data-mid)
+        --   3. a custom-base64 alphabet derived from the ETag header
+        -- The offsets below are reverse-engineered from MidiShow's current
+        -- payload layout; if they stop working, check the site's network tab
+        -- and update these constants.
         local postUrl = "https://www.midishow.com/midi/new-file?id=" .. tostring(midiId)
         local postHeaders = {
             ["Accept"] = "*/*",
@@ -1664,11 +1292,11 @@ local function fetchMidiShowMidi(rawInput, shouldAbort)
                         or body2:match("^[^(]+%('([^']*)'%)")
                         or (#body2 >= 7 and body2:sub(4, -4) or "")
 
-                    local chrSet = hexToStr(etag) .. body1:sub(57)
+                    local chrSet = Core.hexToStr(etag) .. body1:sub(57)
                     if #chrSet >= 64 then
-                        local part1 = decodeCustomBase64(body1:sub(29, 56), chrSet)
-                        local part2 = decodeCustomBase64(jsChunk, chrSet)
-                        local part3 = decodeCustomBase64(body1:sub(1, 28), chrSet)
+                        local part1 = Core.decodeCustomBase64(body1:sub(29, 56), chrSet)
+                        local part2 = Core.decodeCustomBase64(jsChunk, chrSet)
+                        local part3 = Core.decodeCustomBase64(body1:sub(1, 28), chrSet)
                         local midiBytes = part1 .. part2 .. part3
                         if midiBytes:find("MThd", 1, true) then
                             return true, midiBytes, nil
@@ -1713,7 +1341,6 @@ local function searchMidiShow(query)
         return false, nil, "Enter a search query"
     end
 
-    local searchUrl = "https://www.midishow.com/en/search/result?q=" .. encodeQueryParam(cleanQuery)
     local headers = {
         ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         ["Accept-Language"] = "en-US,en;q=0.9,zh-CN;q=0.8",
@@ -1724,8 +1351,8 @@ local function searchMidiShow(query)
     end
 
     local searchUrls = {
-        "https://www.midishow.com/en/search/result?q=" .. encodeQueryParam(cleanQuery),
-        "https://www.midishow.com/search/result?q=" .. encodeQueryParam(cleanQuery),
+        "https://www.midishow.com/en/search/result?q=" .. Core.encodeQueryParam(cleanQuery),
+        "https://www.midishow.com/search/result?q=" .. Core.encodeQueryParam(cleanQuery),
     }
 
     local results = {}
@@ -1749,11 +1376,11 @@ local function searchMidiShow(query)
                 local rawHref = attrs:match('href=["\']([^"\']+)["\']')
                 if rawHref then
                     local cleanHref = rawHref:gsub("#.*$", ""):gsub("%?.*$", "")
-                    local id = cleanHref:match("/(%d+)%.html") or cleanHref:match("%-(%d+)/?$")
+                    local id = cleanHref:match("/(%d+)%.html") or cleanHref:match("-(%d+)/?$")
                     if id and not seenIds[id] and not cleanHref:find("/midi/browse", 1, true) and not cleanHref:find("/midi/download", 1, true) then
                         local heading = inner:match("<h[1-6][^>]*>(.-)</h[1-6]>") or inner:match("<strong[^>]*>(.-)</strong>")
                         local rawTitle = heading or attrs:match('title=["\']([^"\']+)["\']') or inner
-                        local cleanTitle = stripHtmlTags(rawTitle)
+                        local cleanTitle = Core.stripHtmlTags(rawTitle)
                         if cleanTitle ~= "" and not cleanTitle:lower():match("^download") then
                             if #cleanTitle > 90 then
                                 cleanTitle = cleanTitle:sub(1, 87) .. "..."
@@ -1785,37 +1412,24 @@ end
 
 local function resolveAndFetchMidiUrl(rawUrl, shouldAbort)
     local url = normalizeMidiUrl(rawUrl)
-    if isMuseScoreUrl(url) then
+    if Core.isMuseScoreUrl(url) then
         return fetchMuseScoreMidi(url, shouldAbort)
-    elseif isMidiShowUrl(url) then
+    elseif Core.isMidiShowUrl(url) then
         return fetchMidiShowMidi(url, shouldAbort)
     end
     return fetchMidiBytesWithRetry(url, nil, shouldAbort)
-end
-
-local function deriveTitleFromUrl(url)
-    local lastSeg = tostring(url or ""):match("([^/%?#]+)%s*$") or "Direct URL"
-    lastSeg = lastSeg:gsub("%.midi?$", ""):gsub("%%(%x%x)", function(hex)
-        return string.char(tonumber(hex, 16))
-    end)
-    if lastSeg == "" then return "Direct URL" end
-    return lastSeg
 end
 
 local function downloadAndPlayUrl(rawUrl, sourceName, silent, displayTitle)
     local url = normalizeMidiUrl(rawUrl)
     if not url or not url:match("^https?://") then
         if not silent then
-            Rayfield:Notify({
-                Title = "Invalid URL",
-                Content = "Please enter a valid http:// or https:// .mid, MuseScore, or MidiShow URL.",
-                Duration = 3,
-            })
+            notify("Invalid URL", "Please enter a valid http:// or https:// .mid, MuseScore, or MidiShow URL.", 3)
         end
         return
     end
 
-    local title = displayTitle or deriveTitleFromUrl(url)
+    local title = displayTitle or Core.deriveTitleFromUrl(url)
     stopPlayback()
     local myId = playbackId
     setHudLoading(title, sourceName or "URL")
@@ -1831,87 +1445,78 @@ local function downloadAndPlayUrl(rawUrl, sourceName, silent, displayTitle)
             warn("[" .. sourceName .. "] Load failed:", err, "| URL:", url)
             setHudFailed("Load failed")
             if not silent then
-                Rayfield:Notify({
-                    Title = "Song Load Failed",
-                    Content = tostring(err),
-                    Duration = 4,
-                })
+                notify("Song Load Failed", tostring(err), 4)
             end
             return
         end
 
-        local played = parseAndPlayMidi(midiBody, myId, nil, {title = title, subtitle = sourceName or "URL"})
+        -- Replay closure captures only the small source strings, never the
+        -- downloaded MIDI payload, so stopping the song frees its memory.
+        local replayFn = function()
+            downloadAndPlayUrl(url, sourceName, silent, displayTitle)
+        end
+        recordHistory(title, sourceName, replayFn)
+        local played = parseAndPlayMidi(midiBody, myId, nil, {title = title, subtitle = sourceName or "URL"}, replayFn)
         if not played and playbackId == myId and not silent then
-            Rayfield:Notify({
-                Title = "Invalid MIDI",
-                Content = "Downloaded file could not be parsed as MIDI.",
-                Duration = 4,
-            })
+            notify("Invalid MIDI", "Downloaded file could not be parsed as MIDI.", 4)
         end
     end)
 end
 
--- Shared State Tables
-local QuickState = {
-    map = {},
-    order = {},
-    filtered = {},
-    totalMatches = 0,
-    query = "",
-    selected = nil,
-    repoUrl = QUICKPICKS_REPO_URL,
-    sourceLabel = "Built-in",
-    autoPlayOnSelect = false,
-    suppressCallback = false,
-    verifying = false,
-    fetchGeneration = 0,
-    statusActive = false,
-}
+-- ==========================================
+-- Obsidian window & tabs
+-- ==========================================
+local Window = Library:CreateWindow({
+    Title = "🎹 Universal Piano",
+    Footer = "MIDI · Local · Sheets · NanoMIDI · MuseScore · MidiShow",
+    ToggleKeybind = Enum.KeyCode.Quote,
+    ShowCustomCursor = true,
+})
 
-local LocalState = {
-    files = {},
-    order = {},
-    query = "",
-    selected = nil,
-    autoPlayOnSelect = false,
-    suppressCallback = false,
-}
+local QuickTab = Window:AddTab("Quick Picks & URL", "music")
+local LocalTab = Window:AddTab("Local & Sheets", "folder")
+local NanoTab = Window:AddTab("NanoMIDI API", "radio")
+local ExternalTab = Window:AddTab("MuseScore & MidiShow", "link")
+local GlobalTab = Window:AddTab("🔍 Global Search", "search")
 
-local NanoState = {
-    headers = {
-        ["Accept"] = "application/json, */*",
-        ["Origin"] = "https://nanomidi.net",
-        ["Referer"] = "https://nanomidi.net/",
-    },
-    apiData = {},
-    order = {},
-    query = "",
-    selected = nil,
-    loaded = false,
-    loadingList = false,
-    autoPlayOnSelect = false,
-    suppressCallback = false,
-}
+-- ==========================================
+-- UI helpers
+-- ==========================================
+local function setDropdownOptions(dropdown, options, fallbackText, setSuppress)
+    local display = options
+    local hasItems = #options > 0
+    if not hasItems then
+        display = {fallbackText or "No matching songs"}
+    end
 
-local GlobalState = {
-    resultsMap = {},
-    resultsOrder = {},
-    totalMatches = 0,
-    query = "",
-    selected = nil,
-    suppressCallback = false,
-    statusActive = false,
-    liveExternalSearch = true,
-}
+    if setSuppress then setSuppress(true) end
+    pcall(function()
+        dropdown:SetValues(display)
+        dropdown:SetValue(display[1])
+    end)
+    if setSuppress then setSuppress(false) end
 
-local refreshGlobalSearchResults -- forward declaration
+    return hasItems and display[1] or nil
+end
+
+local function setLabelSafe(labelObj, text)
+    if labelObj and labelObj.SetText then
+        pcall(function()
+            labelObj:SetText(text)
+        end)
+    end
+end
 
 -- ==========================================
 -- Tab 1: Quick Picks (Auto-Sync + Search) & Direct URL
 -- ==========================================
-QuickTab:CreateSection("Quick Picks (Search & Auto-Sync)")
+local QuickPicksBox = QuickTab:AddGroupbox({
+    Side = "Left",
+    Name = "Quick Picks (Search & Auto-Sync)",
+})
 
-local QuickStatusLabel = QuickTab:CreateLabel("Quick Picks: Loading...")
+local QuickStatusLabel = QuickPicksBox:AddLabel("QuickStatusLabel", { Text = "Quick Picks: Loading..." })
+local QuickVerifyLabel = QuickPicksBox:AddLabel("QuickVerifyLabel", { Text = "" })
 local QuickPickDropdown -- forward declared
 
 local function updateQuickStatusLabel()
@@ -1930,7 +1535,7 @@ registerStopHook(function()
 end)
 
 local function applyQuickPickFilter()
-    local matches, totalMatches = filterSongList(QuickState.order, QuickState.query, MAX_DROPDOWN_ITEMS)
+    local matches, totalMatches = Core.filterSongList(QuickState.order, QuickState.query, MAX_DROPDOWN_ITEMS)
     QuickState.filtered = matches
     QuickState.totalMatches = totalMatches
     QuickState.selected = setDropdownOptions(
@@ -1944,8 +1549,8 @@ local function applyQuickPickFilter()
 end
 
 local function setQuickPickEntries(entries, sourceLabel)
-    table.clear(QuickState.map)
-    table.clear(QuickState.order)
+    for k in pairs(QuickState.map) do QuickState.map[k] = nil end
+    for k in pairs(QuickState.order) do QuickState.order[k] = nil end
     QuickState.sourceLabel = sourceLabel or "Built-in"
 
     for _, item in ipairs(entries) do
@@ -1967,68 +1572,40 @@ local function setQuickPickEntries(entries, sourceLabel)
 end
 
 local function parseQuickPickFile(body)
-    local list = {}
-    local trimmed = body:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$")
-
-    if trimmed:sub(1, 1) == "[" or trimmed:sub(1, 1) == "{" then
-        local ok, data = pcall(HttpService.JSONDecode, HttpService, trimmed)
-        if ok and type(data) == "table" then
-            local items = data.songs or data
-            for _, item in ipairs(items) do
-                if type(item) == "table" and item.url then
-                    table.insert(list, {
-                        name = tostring(item.name or "Untitled"),
-                        url = tostring(item.url),
-                    })
-                end
-            end
-            return list
-        end
-    end
-
-    for line in body:gmatch("[^\r\n]+") do
-        local clean = line:match("^%s*(.-)%s*$")
-        if clean ~= "" and not clean:match("^#") and not clean:match("^//") then
-            local name, url = clean:match("^(.-)%s*|%s*(https?://.+)$")
-            if name and url then
-                table.insert(list, {name = name, url = url})
-            elseif clean:match("^https?://") then
-                local fallbackName = clean:match("([^/]+)%.midi?$") or clean
-                table.insert(list, {name = fallbackName, url = clean})
-            end
-        end
-    end
-
-    return list
+    return Core.parseQuickPickFile(body, function(str)
+        local ok, data = pcall(HttpService.JSONDecode, HttpService, str)
+        return ok and data
+    end)
 end
 
 local function playQuickPickSelection(label)
     local url = label and QuickState.map[label]
     if not url then
-        Rayfield:Notify({Title = "No Song Selected", Content = "Pick a song from the dropdown first.", Duration = 3})
+        notify("No Song Selected", "Pick a song from the dropdown first.", 3)
         return
     end
     downloadAndPlayUrl(url, "QuickPick", false, label)
 end
 
-local QuickSearchInput = QuickTab:CreateInput({
-    Name = "🔍 Search Quick Picks",
-    CurrentValue = "",
-    PlaceholderText = "Type song/artist & press Enter (blank = all)",
-    RemoveTextAfterFocusLost = false,
-    Flag = "QuickSearchInput",
+local QuickSearchInput = QuickPicksBox:AddInput("QuickSearchInput", {
+    Text = "🔍 Search Quick Picks",
+    Default = "",
+    Placeholder = "Type song/artist & press Enter (blank = all)",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         QuickState.query = tostring(Text or "")
         applyQuickPickFilter()
     end,
 })
 
-QuickPickDropdown = QuickTab:CreateDropdown({
-    Name = "Select Quick Pick",
-    Options = {"Loading..."},
-    CurrentOption = {"Loading..."},
-    MultipleOptions = false,
-    Flag = "QuickPickSelect",
+QuickPickDropdown = QuickPicksBox:AddDropdown("QuickPickSelect", {
+    Text = "Select Quick Pick",
+    Values = {"Loading..."},
+    Default = "Loading...",
+    Multi = false,
+    Searchable = true,
+    MaxVisibleDropdownItems = 12,
     Callback = function(Option)
         local chosen = type(Option) == "table" and Option[1] or Option
         QuickState.selected = QuickState.map[chosen] and chosen or nil
@@ -2038,35 +1615,32 @@ QuickPickDropdown = QuickTab:CreateDropdown({
     end,
 })
 
-setQuickPickEntries(DEFAULT_QUICKPICKS, "Built-in")
-
-QuickTab:CreateToggle({
-    Name = "⚡ Auto-Play Song on Select",
-    CurrentValue = false,
-    Flag = "QuickAutoPlayToggle",
+QuickPicksBox:AddToggle("QuickAutoPlayToggle", {
+    Text = "⚡ Auto-Play Song on Select",
+    Default = false,
     Callback = function(Value)
         QuickState.autoPlayOnSelect = Value
     end,
 })
 
-QuickTab:CreateButton({
-    Name = "▶️ Play Quick Pick",
-    Callback = function()
+QuickPicksBox:AddButton({
+    Text = "▶️ Play Quick Pick",
+    Func = function()
         playQuickPickSelection(QuickState.selected)
     end,
 })
 
-QuickTab:CreateButton({
-    Name = "⚡ Auto-Try Matching Quick Picks",
-    Callback = function()
+QuickPicksBox:AddButton({
+    Text = "⚡ Auto-Try Matching Quick Picks",
+    Func = function()
         local candidates = {}
         for _, label in ipairs(QuickState.order) do
-            if matchesQuery(label, QuickState.query) and QuickState.map[label] then
+            if Core.matchesQuery(label, QuickState.query) and QuickState.map[label] then
                 table.insert(candidates, {label = label, url = QuickState.map[label]})
             end
         end
         if #candidates == 0 then
-            Rayfield:Notify({Title = "No Matches", Content = "No Quick Picks matched your search.", Duration = 3})
+            notify("No Matches", "No Quick Picks matched your search.", 3)
             return
         end
 
@@ -2084,11 +1658,14 @@ QuickTab:CreateButton({
                 end)
                 if playbackId ~= myId then return end
                 if ok and midiBody then
+                    local replayFn = function()
+                        playQuickPickSelection(entry.label)
+                    end
                     local played = parseAndPlayMidi(midiBody, myId, function()
                         QuickState.statusActive = true
                         setLabelSafe(QuickStatusLabel, "Playing: " .. entry.label)
-                        Rayfield:Notify({Title = "Loaded & Playing", Content = entry.label, Duration = 3})
-                    end, {title = entry.label, subtitle = "QuickPick"})
+                        notify("Loaded & Playing", entry.label, 3)
+                    end, {title = entry.label, subtitle = "QuickPick"}, replayFn)
                     if playbackId ~= myId then return end
                     if played then
                         updateQuickStatusLabel()
@@ -2100,33 +1677,35 @@ QuickTab:CreateButton({
             if playbackId == myId then
                 setHudFailed("No working Quick Pick found")
                 updateQuickStatusLabel()
-                Rayfield:Notify({Title = "Auto-Try Failed", Content = "None of the matching Quick Picks returned valid MIDI data.", Duration = 4})
+                notify("Auto-Try Failed", "None of the matching Quick Picks returned valid MIDI data.", 4)
             end
         end)
     end,
 })
 
-QuickTab:CreateButton({
-    Name = "🔄 Clear Search",
-    Callback = function()
+QuickPicksBox:AddButton({
+    Text = "🔄 Clear Search",
+    Func = function()
         QuickState.query = ""
-        pcall(function() QuickSearchInput:Set("") end)
+        pcall(function() QuickSearchInput:SetValue("") end)
         applyQuickPickFilter()
     end,
 })
 
-QuickTab:CreateSection("GitHub Repo Sync (Auto-Retry)")
+-- ==========================================
+-- GitHub Repo Sync (Auto-Retry)
+-- ==========================================
+local RepoBox = QuickTab:AddGroupbox({
+    Side = "Left",
+    Name = "GitHub Repo Sync (Auto-Retry)",
+})
 
 local function fetchFromRepoUrl(urlToFetch, silent)
     local candidates = buildRepoUrlCandidates(urlToFetch)
     if #candidates == 0 then
-        setQuickPickEntries(DEFAULT_QUICKPICKS, "Built-in")
+        setQuickPickEntries({}, "Empty")
         if not silent then
-            Rayfield:Notify({
-                Title = "Built-in Quick Picks",
-                Content = string.format("Loaded %d built-in songs.", #QuickState.order),
-                Duration = 3,
-            })
+            notify("Built-in Quick Picks", "No repo URL provided.", 3)
         end
         return
     end
@@ -2154,11 +1733,7 @@ local function fetchFromRepoUrl(urlToFetch, silent)
                         if #parsed > 0 then
                             if QuickState.fetchGeneration ~= myGen then return end
                             setQuickPickEntries(parsed, "GitHub Repo")
-                            Rayfield:Notify({
-                                Title = "Repo Songs Auto-Loaded",
-                                Content = string.format("Loaded %d songs from GitHub!", #QuickState.order),
-                                Duration = 3,
-                            })
+                            notify("Repo Songs Auto-Loaded", string.format("Loaded %d songs from GitHub!", #QuickState.order), 3)
                             return
                         else
                             lastErr = "Empty or invalid song JSON/list"
@@ -2179,13 +1754,15 @@ local function fetchFromRepoUrl(urlToFetch, silent)
 
         if QuickState.fetchGeneration ~= myGen then return end
         warn("[Repo Auto-Load] Failed after retries:", lastErr)
-        applyQuickPickFilter()
+        -- songs.json is the single source of truth: on failure we do not
+        -- fall back to a stale built-in list. The dropdown keeps its last
+        -- contents but the status reflects the failure.
+        if QuickState.query ~= "" or #QuickState.order == 0 then
+            applyQuickPickFilter()
+        end
+        setLabelSafe(QuickStatusLabel, "Quick Picks: Repo load failed (" .. tostring(lastErr) .. ")")
         if not silent then
-            Rayfield:Notify({
-                Title = "Repo Load Failed (Using Fallback)",
-                Content = tostring(lastErr),
-                Duration = 4,
-            })
+            notify("Repo Load Failed", tostring(lastErr), 4)
         end
     end)
 end
@@ -2194,12 +1771,12 @@ if QUICKPICKS_REPO_URL ~= "" then
     fetchFromRepoUrl(QUICKPICKS_REPO_URL, true)
 end
 
-QuickTab:CreateInput({
-    Name = "GitHub Repo File URL (Auto-Loads)",
-    CurrentValue = QUICKPICKS_REPO_URL,
-    PlaceholderText = "https://raw.githubusercontent.com/q-29/piano/refs/heads/main/songs.json",
-    RemoveTextAfterFocusLost = false,
-    Flag = "RepoFileUrl",
+RepoBox:AddInput("RepoFileUrl", {
+    Text = "GitHub Repo File URL (Auto-Loads)",
+    Default = QUICKPICKS_REPO_URL,
+    Placeholder = "https://raw.githubusercontent.com/285190-tech/piano/refs/heads/main/songs.json",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         local cleaned = tostring(Text or ""):match("^%s*(.-)%s*$")
         if cleaned ~= QuickState.repoUrl then
@@ -2209,146 +1786,443 @@ QuickTab:CreateInput({
     end,
 })
 
-QuickTab:CreateButton({
-    Name = "🔄 Fetch Songs from Repo",
-    Callback = function()
+RepoBox:AddButton({
+    Text = "🔄 Fetch Songs from Repo",
+    Func = function()
         fetchFromRepoUrl(QuickState.repoUrl, false)
     end,
 })
 
-QuickTab:CreateButton({
-    Name = "🔍 Verify All Links (Check in F9)",
-    Callback = function()
-        if QuickState.verifying then return end
+RepoBox:AddButton({
+    Text = "🔍 Verify All Links (Progress Shown)",
+    Func = function()
+        if QuickState.verifying then
+            QuickState.verifyAbort = true
+            return
+        end
         QuickState.verifying = true
+        QuickState.verifyAbort = false
+        QuickState.verifyFailures = {}
+        setLabelSafe(QuickVerifyLabel, "")
 
-        task.spawn(function()
-            local snapshot = {}
-            for _, label in ipairs(QuickState.order) do
-                local url = QuickState.map[label]
-                if url then
-                    table.insert(snapshot, {label = label, url = url})
-                end
+        local snapshot = {}
+        for _, label in ipairs(QuickState.order) do
+            local url = QuickState.map[label]
+            if url then
+                table.insert(snapshot, {label = label, url = url})
             end
+        end
 
-            local total = #snapshot
-            local passed = 0
-            local failedCount = 0
-            local index = 0
-            local done = 0
+        local total = #snapshot
+        local passed = 0
+        local failedCount = 0
+        local index = 0
+        local done = 0
+        local lastProgressLabel = 0
 
-            Rayfield:Notify({
-                Title = "Verifying Links...",
-                Content = string.format("Testing %d links. Press F9 to view any failures.", total),
-                Duration = 3,
-            })
+        notify("Verifying Links...", string.format("Testing %d links. Click the button again to cancel.", total), 3)
 
-            for _ = 1, 6 do
-                task.spawn(function()
-                    while true do
-                        index = index + 1
-                        local i = index
-                        if i > total then break end
+        for _ = 1, 6 do
+            task.spawn(function()
+                while true do
+                    if QuickState.verifyAbort then break end
+                    index = index + 1
+                    local i = index
+                    if i > total then break end
 
-                        local item = snapshot[i]
-                        local ok, res, err = safeRequest(item.url)
-                        local status = ok and res and (res.StatusCode or res.status_code) or nil
-                        local body = getResponseBody(res)
-                        local isMidi = ok and res and status == 200 and body ~= nil and body:find("MThd", 1, true) ~= nil
+                    local item = snapshot[i]
+                    local ok, res, err = safeRequest(item.url)
+                    local status = ok and res and (res.StatusCode or res.status_code) or nil
+                    local body = getResponseBody(res)
+                    local isMidi = ok and res and status == 200 and body ~= nil and body:find("MThd", 1, true) ~= nil
 
-                        if isMidi then
-                            passed = passed + 1
-                        else
-                            failedCount = failedCount + 1
-                            local reason = not ok and tostring(err) or ("HTTP " .. tostring(status) .. " / not MIDI")
-                            warn(string.format("[Verify FAIL] %s | %s | %s", item.label, reason, item.url))
-                        end
-                        done = done + 1
+                    if isMidi then
+                        passed = passed + 1
+                    else
+                        failedCount = failedCount + 1
+                        local reason = not ok and tostring(err) or ("HTTP " .. tostring(status) .. " / not MIDI")
+                        table.insert(QuickState.verifyFailures, string.format("%s (%s)", item.label, reason))
+                        warn(string.format("[Verify FAIL] %s | %s | %s", item.label, reason, item.url))
                     end
-                end)
-            end
+                    done = done + 1
 
-            while done < total do
-                task.wait(0.1)
-            end
+                    -- Live progress feedback (at most every 5 links).
+                    if done - lastProgressLabel >= 5 or done == total then
+                        lastProgressLabel = done
+                        setLabelSafe(QuickStatusLabel, string.format("Verifying links: %d/%d done", done, total))
+                    end
+                end
+            end)
+        end
 
-            QuickState.verifying = false
-            print(string.format("[QuickPicks Verify] Passed: %d / %d | Failed: %d", passed, total, failedCount))
-            Rayfield:Notify({
-                Title = "Link Verification Done",
-                Content = string.format("%d/%d working, %d failed (see F9).", passed, total, failedCount),
-                Duration = 5,
-            })
-        end)
+        while done < total and not QuickState.verifyAbort do
+            task.wait(0.1)
+        end
+
+        QuickState.verifying = false
+        local summary = string.format("Passed: %d / %d | Failed: %d", passed, total, failedCount)
+        if #QuickState.verifyFailures > 0 then
+            local shown = table.concat(QuickState.verifyFailures, "\n")
+            if #shown > 1500 then shown = shown:sub(1, 1500) .. " ..." end
+            setLabelSafe(QuickVerifyLabel, summary .. "\n\nFailed:\n" .. shown)
+        end
+        setLabelSafe(QuickStatusLabel, "Link verification finished.")
+        print(string.format("[QuickPicks Verify] %s", summary))
+        notify("Link Verification Done", summary .. (QuickState.verifyAbort and " (cancelled)" or ""), 5)
     end,
 })
 
-QuickTab:CreateSection("Direct .mid / MuseScore / MidiShow URL")
+-- ==========================================
+-- Custom MIDI List (item 9: additional source)
+-- Paste "Name | https://.../file.mid" lines (or bare URLs) and merge them
+-- into the Quick Picks list as a third source alongside the GitHub repo.
+-- ==========================================
+local CustomListBox = QuickTab:AddGroupbox({
+    Side = "Left",
+    Name = "📋 Custom MIDI List",
+})
 
+local customListBody = ""
+
+CustomListBox:AddInput("CustomListInput", {
+    Text = "Custom MIDI List (Name | URL, one per line)",
+    Default = "",
+    Placeholder = "Beethoven - Fur Elise | https://.../fur-elise.mid\nhttps://.../other.mid",
+    ClearTextOnFocus = false,
+    Finished = true,
+    Callback = function(Text)
+        customListBody = Text or ""
+    end,
+})
+
+CustomListBox:AddButton({
+    Text = "➕ Merge Into Quick Picks",
+    Func = function()
+        if customListBody == "" then
+            notify("Custom List", "Paste at least one song line first.", 3)
+            return
+        end
+        local parsed = parseQuickPickFile(customListBody)
+        if #parsed == 0 then
+            notify("Custom List", "No valid \"Name | URL\" lines found.", 3)
+            return
+        end
+
+        -- Merge: keep existing entries, append new ones (dedupe by URL).
+        local existingUrls = {}
+        for _, label in ipairs(QuickState.order) do
+            existingUrls[QuickState.map[label]] = true
+        end
+        local added = 0
+        for _, item in ipairs(parsed) do
+            if not existingUrls[item.url] then
+                local baseLabel = tostring(item.name or "Untitled")
+                local label = baseLabel
+                local suffix = 2
+                while QuickState.map[label] do
+                    label = baseLabel .. " (" .. tostring(suffix) .. ")"
+                    suffix = suffix + 1
+                end
+                QuickState.map[label] = normalizeMidiUrl(item.url)
+                table.insert(QuickState.order, label)
+                existingUrls[item.url] = true
+                added = added + 1
+            end
+        end
+        applyQuickPickFilter()
+        notify("Custom List Merged", string.format("Added %d song(s) to Quick Picks.", added), 3)
+    end,
+})
+
+-- ==========================================
+-- Network Tuning (item 12: retry / timeout)
+-- ==========================================
+local NetworkBox = QuickTab:AddGroupbox({
+    Side = "Left",
+    Name = "🌐 Network Tuning",
+})
+
+NetworkBox:AddSlider("MaxRetryAttempts", {
+    Text = "Max Retry Attempts",
+    Default = NetworkConfig.maxAttempts,
+    Min = 1,
+    Max = 8,
+    Rounding = 0,
+    Callback = function(Value)
+        NetworkConfig.maxAttempts = Value
+    end,
+})
+
+NetworkBox:AddSlider("RetryDelaySeconds", {
+    Text = "Retry Delay (seconds)",
+    Default = NetworkConfig.retryDelay,
+    Min = 0.2,
+    Max = 5,
+    Rounding = 1,
+    Callback = function(Value)
+        NetworkConfig.retryDelay = Value
+    end,
+})
+
+NetworkBox:AddLabel("NetworkTuningLabel", {
+    Text = "Applies to all song fetches (repo, direct URL, MuseScore, MidiShow, NanoMIDI).",
+})
+
+-- ==========================================
+-- Direct .mid / MuseScore / MidiShow URL
+-- ==========================================
 local customMidiUrl = ""
 
-QuickTab:CreateInput({
-    Name = "Direct .mid / Score URL",
-    CurrentValue = "",
-    PlaceholderText = "https://.../song.mid, musescore.com/.../scores/..., or midishow.com/...",
-    RemoveTextAfterFocusLost = false,
-    Flag = "CustomMidiUrl",
+local DirectBox = QuickTab:AddGroupbox({
+    Side = "Left",
+    Name = "Direct .mid / MuseScore / MidiShow URL",
+})
+
+DirectBox:AddInput("CustomMidiUrl", {
+    Text = "Direct .mid / Score URL",
+    Default = "",
+    Placeholder = "https://.../song.mid, musescore.com/.../scores/..., or midishow.com/...",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         customMidiUrl = Text
     end,
 })
 
-QuickTab:CreateButton({
-    Name = "▶️ Download & Play URL",
-    Callback = function()
+DirectBox:AddButton({
+    Text = "▶️ Download & Play URL",
+    Func = function()
         downloadAndPlayUrl(customMidiUrl, "Direct URL", false)
     end,
 })
 
-QuickTab:CreateSection("Playback Controls")
+-- ==========================================
+-- Playback Controls
+-- ==========================================
+local PlaybackBox = QuickTab:AddGroupbox({
+    Side = "Left",
+    Name = "Playback Controls",
+})
 
-local ShowPlayerHudToggle = QuickTab:CreateToggle({
-    Name = "📺 Show Onscreen Progress Bar",
-    CurrentValue = true,
-    Flag = "ShowPlayerHud",
+local ShowPlayerHudToggle = PlaybackBox:AddToggle("ShowPlayerHud", {
+    Text = "📺 Show Onscreen Progress Bar",
+    Default = true,
     Callback = function(Value)
         PlayerHudState.enabled = Value
     end,
 })
 
-QuickTab:CreateSlider({
-    Name = "Playback Speed",
-    Range = {0.1, 5},
-    Increment = 0.1,
+PlaybackBox:AddSlider("QuickPlaybackSpeed", {
+    Text = "Playback Speed",
+    Default = 1,
+    Min = 0.1,
+    Max = 5,
+    Rounding = 1,
     Suffix = "x",
-    CurrentValue = 1,
-    Flag = "QuickPlaybackSpeed",
     Callback = function(Value)
         currentPlaybackSpeed = Value
     end,
 })
 
-QuickTab:CreateButton({
-    Name = "⏯️ Pause / Resume",
-    Callback = togglePausePlayback,
+PlaybackBox:AddButton({
+    Text = "⏯️ Pause / Resume",
+    Func = togglePausePlayback,
 })
 
-QuickTab:CreateButton({
-    Name = "⏹️ Stop",
-    Callback = stopPlayback,
+PlaybackBox:AddButton({
+    Text = "⏹️ Stop",
+    Func = stopPlayback,
+})
+
+-- ==========================================
+-- Velocity, Layout & Articulation (items 1, 2, 5, 6)
+-- ==========================================
+PlaybackBox:AddSlider("VelocityMin", {
+    Text = "Velocity Output Min",
+    Default = velocityMin,
+    Min = 0,
+    Max = 1,
+    Rounding = 2,
+    Callback = function(Value)
+        velocityMin = Value
+    end,
+})
+
+PlaybackBox:AddSlider("VelocityMax", {
+    Text = "Velocity Output Max",
+    Default = velocityMax,
+    Min = 0,
+    Max = 1,
+    Rounding = 2,
+    Callback = function(Value)
+        velocityMax = Value
+    end,
+})
+
+PlaybackBox:AddSlider("VelocityCurve", {
+    Text = "Velocity Curve (1=linear)",
+    Default = 1,
+    Min = 0.5,
+    Max = 3,
+    Rounding = 2,
+    Callback = function(Value)
+        velocityCurve = Value
+    end,
+})
+
+PlaybackBox:AddToggle("LegatoToggle", {
+    Text = "🎹 Legato (Sustain on Re-trigger)",
+    Default = false,
+    Tooltip = "When on, re-pressing a held key does not release it first (overlap). When off, re-articulation cuts the previous press.",
+    Callback = function(Value)
+        legatoMode = Value
+    end,
+})
+
+PlaybackBox:AddToggle("HighlightNextToggle", {
+    Text = "💡 Highlight Next Note",
+    Default = false,
+    Tooltip = "Flash the upcoming note(s) in the onscreen HUD as they approach.",
+    Callback = function(Value)
+        PlayerHudState.highlightNext = Value
+        if not Value then
+            PlayerHudState.nextNoteChars = nil
+        end
+    end,
+})
+
+PlaybackBox:AddDropdown("LayoutSelect", {
+    Text = "Keyboard Layout",
+    Values = { "Full (60 keys)", "Compact (12 keys)" },
+    Default = 1,
+    Multi = false,
+    Callback = function(Option)
+        local choice = type(Option) == "table" and Option[1] or Option
+        local layoutName = choice == "Compact (12 keys)" and "compact" or "full"
+        if layoutName ~= currentLayoutName then
+            currentLayoutName = layoutName
+            buildLayout(layoutName)
+            notify("Layout Changed", "Keyboard layout: " .. choice, 2)
+        end
+    end,
+})
+
+-- ==========================================
+-- Playback History (item 8)
+-- ==========================================
+local HistoryBox = QuickTab:AddGroupbox({
+    Side = "Left",
+    Name = "🕘 Playback History",
+})
+
+local HistoryDropdown -- forward declared
+local HistoryStatusLabel = HistoryBox:AddLabel("HistoryStatusLabel", {
+    Text = "History: No songs played yet",
+})
+
+local function refreshHistoryDropdown()
+    local entries = HistoryState.entries
+    local labels = {}
+    for _, entry in ipairs(entries) do
+        table.insert(labels, string.format("%s [%s]", entry.title, entry.source))
+    end
+
+    if #labels == 0 then
+        setDropdownOptions(
+            HistoryDropdown,
+            {},
+            "No history yet",
+            function(v) HistoryState.suppressCallback = v end
+        )
+        setLabelSafe(HistoryStatusLabel, "History: No songs played yet")
+        return
+    end
+
+    setDropdownOptions(
+        HistoryDropdown,
+        labels,
+        labels[1],
+        function(v) HistoryState.suppressCallback = v end
+    )
+    setLabelSafe(HistoryStatusLabel, string.format("History: %d entries (newest first)", #entries))
+end
+
+-- Keep history dropdown in sync when playback stops.
+registerStopHook(function()
+    refreshHistoryDropdown()
+end)
+
+HistoryDropdown = HistoryBox:AddDropdown("HistorySelect", {
+    Text = "Select a past song",
+    Values = {"No history yet"},
+    Default = "No history yet",
+    Multi = false,
+    Searchable = true,
+    MaxVisibleDropdownItems = 12,
+    Callback = function(Option)
+        local chosen = type(Option) == "table" and Option[1] or Option
+        local index = nil
+        for i, entry in ipairs(HistoryState.entries) do
+            if string.format("%s [%s]", entry.title, entry.source) == chosen then
+                index = i
+                break
+            end
+        end
+        if index and not HistoryState.suppressCallback then
+            local entry = HistoryState.entries[index]
+            if entry and entry.replayFn then
+                stopPlayback()
+                entry.replayFn()
+            else
+                notify("History", "No replayable entry for this song.", 3)
+            end
+        end
+    end,
+})
+
+HistoryBox:AddButton({
+    Text = "🔄 Replay Selected",
+    Func = function()
+        local chosen = HistoryDropdown and HistoryDropdown.Value
+        if not chosen or chosen == "No history yet" then
+            notify("History", "Pick a song from the history list first.", 3)
+            return
+        end
+        for _, entry in ipairs(HistoryState.entries) do
+            if string.format("%s [%s]", entry.title, entry.source) == chosen then
+                if entry.replayFn then
+                    stopPlayback()
+                    entry.replayFn()
+                end
+                return
+            end
+        end
+    end,
+})
+
+HistoryBox:AddButton({
+    Text = "🗑️ Clear History",
+    Func = function()
+        HistoryState.entries = {}
+        refreshHistoryDropdown()
+        notify("History", "Playback history cleared.", 2)
+    end,
 })
 
 -- ==========================================
 -- Tab 2: Local .mid Files & Text Sheets
 -- ==========================================
-LocalTab:CreateSection("Local .mid Files (Workspace)")
+local LocalBox = LocalTab:AddGroupbox({
+    Side = "Left",
+    Name = "Local .mid Files (Workspace)",
+})
 
-local LocalStatusLabel = LocalTab:CreateLabel("Local MIDI: Scanning...")
+local LocalStatusLabel = LocalBox:AddLabel("LocalStatusLabel", { Text = "Local MIDI: Scanning..." })
 local LocalDropdown -- forward declared
 
 local function scanLocalMidiFiles()
-    table.clear(LocalState.files)
-    table.clear(LocalState.order)
+    for k in pairs(LocalState.files) do LocalState.files[k] = nil end
+    for k in pairs(LocalState.order) do LocalState.order[k] = nil end
 
     if not listfiles or not readfile then
         setLabelSafe(LocalStatusLabel, "Local MIDI: Executor lacks listfiles/readfile")
@@ -2386,7 +2260,7 @@ local function scanLocalMidiFiles()
 end
 
 local function applyLocalFilter()
-    local matches, totalMatches = filterSongList(LocalState.order, LocalState.query, MAX_DROPDOWN_ITEMS)
+    local matches, totalMatches = Core.filterSongList(LocalState.order, LocalState.query, MAX_DROPDOWN_ITEMS)
     local fallback = #LocalState.order == 0 and "No .mid files in workspace" or "No matching local files"
     LocalState.selected = setDropdownOptions(
         LocalDropdown,
@@ -2405,51 +2279,55 @@ end
 local function playLocalSelection(label)
     local path = label and LocalState.files[label]
     if not path or not readfile then
-        Rayfield:Notify({Title = "No Local File", Content = "Select a valid .mid file first.", Duration = 3})
+        notify("No Local File", "Select a valid .mid file first.", 3)
         return
     end
 
     local ok, content = pcall(readfile, path)
     if not ok or type(content) ~= "string" then
         warn("[Local MIDI] Failed to read file:", tostring(content))
-        Rayfield:Notify({Title = "Read Failed", Content = tostring(content), Duration = 3})
+        notify("Read Failed", tostring(content), 3)
         return
     end
 
     if not content:find("MThd", 1, true) then
         warn("[Local MIDI] Not a valid MIDI file (missing MThd):", path)
-        Rayfield:Notify({Title = "Invalid MIDI File", Content = "Selected file is missing an MThd MIDI header.", Duration = 3})
+        notify("Invalid MIDI File", "Selected file is missing an MThd MIDI header.", 3)
         return
     end
 
     stopPlayback()
     local myId = playbackId
+    local replayFn = function()
+        playLocalSelection(label)
+    end
     task.spawn(function()
-        local played = parseAndPlayMidi(content, myId, nil, {title = label, subtitle = "Local .mid"})
+        local played = parseAndPlayMidi(content, myId, nil, {title = label, subtitle = "Local .mid"}, replayFn)
         if not played and playbackId == myId then
-            Rayfield:Notify({Title = "MIDI Parse Error", Content = "Could not parse the selected local MIDI file.", Duration = 4})
+            notify("MIDI Parse Error", "Could not parse the selected local MIDI file.", 4)
         end
     end)
 end
 
-LocalTab:CreateInput({
-    Name = "🔍 Search Local .mid Files",
-    CurrentValue = "",
-    PlaceholderText = "Type filename & press Enter (blank = all)",
-    RemoveTextAfterFocusLost = false,
-    Flag = "LocalSearchInput",
+LocalBox:AddInput("LocalSearchInput", {
+    Text = "🔍 Search Local .mid Files",
+    Default = "",
+    Placeholder = "Type filename & press Enter (blank = all)",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         LocalState.query = tostring(Text or "")
         applyLocalFilter()
     end,
 })
 
-LocalDropdown = LocalTab:CreateDropdown({
-    Name = "Select Local .mid",
-    Options = {"Scanning..."},
-    CurrentOption = {"Scanning..."},
-    MultipleOptions = false,
-    Flag = "LocalMidiSelect",
+LocalDropdown = LocalBox:AddDropdown("LocalMidiSelect", {
+    Text = "Select Local .mid",
+    Values = {"Scanning..."},
+    Default = "Scanning...",
+    Multi = false,
+    Searchable = true,
+    MaxVisibleDropdownItems = 12,
     Callback = function(Option)
         local chosen = type(Option) == "table" and Option[1] or Option
         LocalState.selected = LocalState.files[chosen] and chosen or nil
@@ -2462,18 +2340,17 @@ LocalDropdown = LocalTab:CreateDropdown({
 scanLocalMidiFiles()
 applyLocalFilter()
 
-LocalTab:CreateToggle({
-    Name = "⚡ Auto-Play File on Select",
-    CurrentValue = false,
-    Flag = "LocalAutoPlayToggle",
+LocalBox:AddToggle("LocalAutoPlayToggle", {
+    Text = "⚡ Auto-Play File on Select",
+    Default = false,
     Callback = function(Value)
         LocalState.autoPlayOnSelect = Value
     end,
 })
 
-LocalTab:CreateButton({
-    Name = "🔄 Refresh Local .mid Files",
-    Callback = function()
+LocalBox:AddButton({
+    Text = "🔄 Refresh Local .mid Files",
+    Func = function()
         scanLocalMidiFiles()
         applyLocalFilter()
         if refreshGlobalSearchResults then
@@ -2482,72 +2359,189 @@ LocalTab:CreateButton({
     end,
 })
 
-LocalTab:CreateButton({
-    Name = "▶️ Play Local MIDI",
-    Callback = function()
+LocalBox:AddButton({
+    Text = "▶️ Play Local MIDI",
+    Func = function()
         playLocalSelection(LocalState.selected)
     end,
 })
 
-LocalTab:CreateSection("Text Sheets")
+-- ==========================================
+-- Upload MIDI (item 10: file upload)
+-- Try InsertString (executor paste-file API) first; fall back to pasting
+-- base64-encoded MIDI data. Either way we get the raw bytes and play them.
+-- ==========================================
+local UploadBox = LocalTab:AddGroupbox({
+    Side = "Left",
+    Name = "⬆️ Upload MIDI File",
+})
+
+local uploadedMidi = ""
+
+UploadBox:AddInput("UploadMidiInput", {
+    Text = "Paste MIDI (base64) or use InsertString",
+    Default = "",
+    Placeholder = "Paste base64-encoded .mid data here, or click 'Insert File' if your executor supports it",
+    ClearTextOnFocus = false,
+    Finished = true,
+    Callback = function(Text)
+        uploadedMidi = Text or ""
+    end,
+})
+
+UploadBox:AddButton({
+    Text = "📎 Insert File (InsertString)",
+    Tooltip = "Uses the executor's InsertString to grab a file from your clipboard. Falls back to the base64 input if unavailable.",
+    Func = function()
+        if InsertString then
+            local ok, result = pcall(InsertString)
+            if ok and type(result) == "string" and result ~= "" then
+                uploadedMidi = result
+                UploadBox.UploadMidiInput:SetText(result)
+            end
+        else
+            notify("Upload", "InsertString not available in this executor. Paste base64 MIDI data instead.", 4)
+        end
+    end,
+})
+
+local function decodeUploadedMidi(data)
+    if data:find("MThd", 1, true) then
+        return data
+    end
+    local midiData = Core.decodeBase64(data)
+    if not midiData or midiData == "" then
+        return nil
+    end
+    if not midiData:find("MThd", 1, true) then
+        return nil
+    end
+    return midiData
+end
+
+local function playUploadedMidi()
+    local data = uploadedMidi
+    if data == "" then
+        notify("Upload", "No uploaded MIDI data to replay.", 3)
+        return
+    end
+    local midiData = decodeUploadedMidi(data)
+    if not midiData then
+        notify("Upload", "Could not decode base64 MIDI data for replay.", 4)
+        return
+    end
+    stopPlayback()
+    local myId = playbackId
+    task.spawn(function()
+        parseAndPlayMidi(midiData, myId, nil, {title = "Uploaded MIDI", subtitle = "Upload"}, nil)
+    end)
+end
+
+UploadBox:AddButton({
+    Text = "▶️ Play Uploaded MIDI",
+    Func = function()
+        if uploadedMidi == "" then
+            notify("Upload", "Paste MIDI data (base64) or insert a file first.", 3)
+            return
+        end
+        local midiData = decodeUploadedMidi(uploadedMidi)
+        if not midiData then
+            notify("Upload", "Could not decode base64 MIDI data.", 4)
+            return
+        end
+        stopPlayback()
+        local myId = playbackId
+        local title = "Uploaded MIDI"
+        local replayFn = function()
+            playUploadedMidi()
+        end
+        recordHistory(title, "Upload", replayFn)
+        task.spawn(function()
+            local played = parseAndPlayMidi(midiData, myId, nil, {title = title, subtitle = "Upload"}, replayFn)
+            if not played and playbackId == myId then
+                notify("MIDI Parse Error", "Could not parse the uploaded MIDI data.", 4)
+            end
+        end)
+    end,
+})
+
+-- ==========================================
+-- Text Sheets
+-- ==========================================
+local SheetBox = LocalTab:AddGroupbox({
+    Side = "Left",
+    Name = "Text Sheets",
+})
 
 local pastedSheet = ""
 local sheetBpm = 120
 
-LocalTab:CreateInput({
-    Name = "Paste Text Sheet",
-    CurrentValue = "",
-    PlaceholderText = "e.g. [tu] y [ro] | a [sd]",
-    RemoveTextAfterFocusLost = false,
-    Flag = "SheetInput",
+SheetBox:AddInput("SheetInput", {
+    Text = "Paste Text Sheet",
+    Default = "",
+    Placeholder = "e.g. [tu] y [ro] | a [sd]",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         pastedSheet = Text
     end,
 })
 
-LocalTab:CreateSlider({
-    Name = "Text Sheet BPM",
-    Range = {40, 300},
-    Increment = 5,
+SheetBox:AddSlider("SheetBPM", {
+    Text = "Text Sheet BPM",
+    Default = 120,
+    Min = 40,
+    Max = 300,
+    Rounding = 0,
     Suffix = " BPM",
-    CurrentValue = 120,
-    Flag = "SheetBPM",
     Callback = function(Value)
         sheetBpm = Value
     end,
 })
 
-LocalTab:CreateButton({
-    Name = "▶️ Play Pasted Sheet",
-    Callback = function()
+SheetBox:AddButton({
+    Text = "▶️ Play Pasted Sheet",
+    Func = function()
         if pastedSheet == "" then return end
         stopPlayback()
         local myId = playbackId
+        local title = "Text Sheet (" .. tostring(sheetBpm) .. " BPM)"
+        local replayFn = function()
+            stopPlayback()
+            local newId = playbackId
+            task.spawn(playTextSheet, pastedSheet, sheetBpm, newId, {
+                title = title,
+                subtitle = "Text Sheet",
+            }, replayFn)
+        end
         task.spawn(playTextSheet, pastedSheet, sheetBpm, myId, {
-            title = "Text Sheet (" .. tostring(sheetBpm) .. " BPM)",
+            title = title,
             subtitle = "Text Sheet",
-        })
+        }, replayFn)
     end,
 })
 
-LocalTab:CreateButton({
-    Name = "⏹️ Stop",
-    Callback = stopPlayback,
+SheetBox:AddButton({
+    Text = "⏹️ Stop",
+    Func = stopPlayback,
 })
 
 -- ==========================================
 -- Tab 3: NanoMIDI API (Search + Auto-Retry)
 -- ==========================================
-NanoTab:CreateSection("NanoMIDI Library")
+local NanoBox = NanoTab:AddGroupbox({
+    Side = "Left",
+    Name = "NanoMIDI Library",
+})
 
-local NanoStatusLabel = NanoTab:CreateLabel("NanoMIDI: Auto-loading...")
+local NanoStatusLabel = NanoBox:AddLabel("NanoStatusLabel", { Text = "NanoMIDI: Auto-loading..." })
 local NanoDropdown -- forward declared
 
 local function applyNanoFilter()
     if not NanoState.loaded and #NanoState.order == 0 then
         return
     end
-    local matches, totalMatches = filterSongList(NanoState.order, NanoState.query, MAX_DROPDOWN_ITEMS)
+    local matches, totalMatches = Core.filterSongList(NanoState.order, NanoState.query, MAX_DROPDOWN_ITEMS)
     NanoState.selected = setDropdownOptions(
         NanoDropdown,
         matches,
@@ -2568,7 +2562,7 @@ local function playNanoSelection(label, silent)
     local song = label and NanoState.apiData[label]
     if not song or not song.midiFilename then
         if not silent then
-            Rayfield:Notify({Title = "No Song Selected", Content = "Select a NanoMIDI song first.", Duration = 3})
+            notify("No Song Selected", "Select a NanoMIDI song first.", 3)
         end
         return
     end
@@ -2577,8 +2571,12 @@ local function playNanoSelection(label, silent)
     local myId = playbackId
     setHudLoading(label, "NanoMIDI")
 
+    local replayFn = function()
+        playNanoSelection(label, true)
+    end
+
     task.spawn(function()
-        local url = "https://api.nanomidi.net/api/midis/" .. encodeUrlPath(tostring(song.midiFilename))
+        local url = "https://api.nanomidi.net/api/midis/" .. Core.encodeUrlPath(tostring(song.midiFilename))
         local ok, midiBody, err = fetchMidiBytesWithRetry(url, NanoState.headers, function()
             return playbackId ~= myId
         end)
@@ -2586,15 +2584,15 @@ local function playNanoSelection(label, silent)
         if playbackId ~= myId then return end
 
         if ok and midiBody then
-            local played = parseAndPlayMidi(midiBody, myId, nil, {title = label, subtitle = "NanoMIDI"})
+            local played = parseAndPlayMidi(midiBody, myId, nil, {title = label, subtitle = "NanoMIDI"}, replayFn)
             if not played and playbackId == myId and not silent then
-                Rayfield:Notify({Title = "NanoMIDI Invalid MIDI", Content = "Downloaded file could not be parsed as MIDI.", Duration = 4})
+                notify("NanoMIDI Invalid MIDI", "Downloaded file could not be parsed as MIDI.", 4)
             end
         else
             warn("[NanoMIDI] Download failed:", err)
             setHudFailed("Load failed")
             if not silent then
-                Rayfield:Notify({Title = "NanoMIDI Load Failed", Content = tostring(err), Duration = 4})
+                notify("NanoMIDI Load Failed", tostring(err), 4)
             end
         end
     end)
@@ -2617,7 +2615,7 @@ local function refreshNanoSongs(silent)
                 end)
             end
             if not silent then
-                Rayfield:Notify({Title = "NanoMIDI Load Failed", Content = tostring(err), Duration = 4})
+                notify("NanoMIDI Load Failed", tostring(err), 4)
             end
             return
         end
@@ -2637,12 +2635,12 @@ local function refreshNanoSongs(silent)
             return
         end
 
-        table.clear(NanoState.apiData)
-        table.clear(NanoState.order)
+        for k in pairs(NanoState.apiData) do NanoState.apiData[k] = nil end
+        for k in pairs(NanoState.order) do NanoState.order[k] = nil end
 
         for _, song in ipairs(items) do
             if type(song) == "table" then
-                local baseLabel = tostring(song.name or "Untitled") .. " - " .. formatArtists(song.artists)
+                local baseLabel = tostring(song.name or "Untitled") .. " - " .. Core.formatArtists(song.artists)
                 local label = baseLabel
                 if NanoState.apiData[label] then
                     local withFile = baseLabel .. " (" .. tostring(song.midiFilename or #NanoState.order + 1) .. ")"
@@ -2667,12 +2665,12 @@ local function refreshNanoSongs(silent)
     end)
 end
 
-local NanoSearchInput = NanoTab:CreateInput({
-    Name = "🔍 Search NanoMIDI",
-    CurrentValue = "",
-    PlaceholderText = "Search title/artist & press Enter",
-    RemoveTextAfterFocusLost = false,
-    Flag = "NanoSearchInput",
+local NanoSearchInput = NanoBox:AddInput("NanoSearchInput", {
+    Text = "🔍 Search NanoMIDI",
+    Default = "",
+    Placeholder = "Search title/artist & press Enter",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         NanoState.query = tostring(Text or "")
         if not NanoState.loaded and not NanoState.loadingList then
@@ -2682,12 +2680,13 @@ local NanoSearchInput = NanoTab:CreateInput({
     end,
 })
 
-NanoDropdown = NanoTab:CreateDropdown({
-    Name = "Select Song",
-    Options = {"Fetching..."},
-    CurrentOption = {"Fetching..."},
-    MultipleOptions = false,
-    Flag = "NanoSongSelect",
+NanoDropdown = NanoBox:AddDropdown("NanoSongSelect", {
+    Text = "Select Song",
+    Values = {"Fetching..."},
+    Default = "Fetching...",
+    Multi = false,
+    Searchable = true,
+    MaxVisibleDropdownItems = 12,
     Callback = function(Option)
         local chosen = type(Option) == "table" and Option[1] or Option
         NanoState.selected = NanoState.apiData[chosen] and chosen or nil
@@ -2699,49 +2698,51 @@ NanoDropdown = NanoTab:CreateDropdown({
 
 refreshNanoSongs(true)
 
-NanoTab:CreateToggle({
-    Name = "⚡ Auto-Play Song on Select",
-    CurrentValue = false,
-    Flag = "NanoAutoPlayToggle",
+NanoBox:AddToggle("NanoAutoPlayToggle", {
+    Text = "⚡ Auto-Play Song on Select",
+    Default = false,
     Callback = function(Value)
         NanoState.autoPlayOnSelect = Value
     end,
 })
 
-NanoTab:CreateButton({
-    Name = "🔄 Refresh Song List",
-    Callback = function()
+NanoBox:AddButton({
+    Text = "🔄 Refresh Song List",
+    Func = function()
         refreshNanoSongs(false)
     end,
 })
 
-NanoTab:CreateButton({
-    Name = "🔄 Clear Search",
-    Callback = function()
+NanoBox:AddButton({
+    Text = "🔄 Clear Search",
+    Func = function()
         NanoState.query = ""
-        pcall(function() NanoSearchInput:Set("") end)
+        pcall(function() NanoSearchInput:SetValue("") end)
         applyNanoFilter()
     end,
 })
 
-NanoTab:CreateButton({
-    Name = "▶️ Download & Play",
-    Callback = function()
+NanoBox:AddButton({
+    Text = "▶️ Download & Play",
+    Func = function()
         playNanoSelection(NanoState.selected, false)
     end,
 })
 
-NanoTab:CreateButton({
-    Name = "⏹️ Stop",
-    Callback = stopPlayback,
+NanoBox:AddButton({
+    Text = "⏹️ Stop",
+    Func = stopPlayback,
 })
 
 -- ==========================================
 -- Tab 4: MuseScore & MidiShow
 -- ==========================================
-ExternalTab:CreateSection("MuseScore (Search & Direct Score URL)")
+local MuseBox = ExternalTab:AddGroupbox({
+    Side = "Left",
+    Name = "MuseScore (Search & Direct Score URL)",
+})
 
-local MuseStatusLabel = ExternalTab:CreateLabel("MuseScore: Enter a search term or score URL")
+local MuseStatusLabel = MuseBox:AddLabel("MuseStatusLabel", { Text = "MuseScore: Enter a search term or score URL" })
 local MuseDropdown -- forward declared
 
 local function updateMuseStatusLabel()
@@ -2762,10 +2763,10 @@ registerStopHook(function()
 end)
 
 local function playMuseScoreEntry(rawUrlOrId, displayName, silent)
-    local target = normalizeMuseScoreInput(rawUrlOrId)
-    if not target or not isMuseScoreUrl(target) then
+    local target = Core.normalizeMuseScoreInput(rawUrlOrId)
+    if not target or not Core.isMuseScoreUrl(target) then
         if not silent then
-            Rayfield:Notify({Title = "Invalid MuseScore Input", Content = "Enter a valid musescore.com URL or numeric score ID.", Duration = 3})
+            notify("Invalid MuseScore Input", "Enter a valid musescore.com URL or numeric score ID.", 3)
         end
         return
     end
@@ -2774,6 +2775,10 @@ local function playMuseScoreEntry(rawUrlOrId, displayName, silent)
     stopPlayback()
     local myId = playbackId
     setHudLoading(titleText, "MuseScore")
+
+    local replayFn = function()
+        playMuseScoreEntry(target, displayName, silent)
+    end
 
     task.spawn(function()
         MuseState.statusActive = true
@@ -2787,7 +2792,7 @@ local function playMuseScoreEntry(rawUrlOrId, displayName, silent)
             local played = parseAndPlayMidi(midiBody, myId, function()
                 MuseState.statusActive = true
                 setLabelSafe(MuseStatusLabel, "MuseScore Playing: " .. titleText)
-            end, {title = titleText, subtitle = "MuseScore"})
+            end, {title = titleText, subtitle = "MuseScore"}, replayFn)
             if playbackId ~= myId then return end
             if played then
                 updateMuseStatusLabel()
@@ -2795,7 +2800,7 @@ local function playMuseScoreEntry(rawUrlOrId, displayName, silent)
                 MuseState.statusActive = true
                 setLabelSafe(MuseStatusLabel, "MuseScore: Invalid MIDI data")
                 if not silent then
-                    Rayfield:Notify({Title = "MuseScore Parse Error", Content = "Downloaded MIDI could not be parsed.", Duration = 4})
+                    notify("MuseScore Parse Error", "Downloaded MIDI could not be parsed.", 4)
                 end
             end
         else
@@ -2803,7 +2808,7 @@ local function playMuseScoreEntry(rawUrlOrId, displayName, silent)
             setLabelSafe(MuseStatusLabel, "MuseScore Failed: " .. tostring(err))
             setHudFailed("Load failed")
             if not silent then
-                Rayfield:Notify({Title = "MuseScore Load Failed", Content = tostring(err), Duration = 4})
+                notify("MuseScore Load Failed", tostring(err), 4)
             end
         end
     end)
@@ -2817,8 +2822,8 @@ runMuseSearch = function(query, silent)
 
     if clean == "" then
         MuseState.searching = false
-        table.clear(MuseState.map)
-        table.clear(MuseState.order)
+        for k in pairs(MuseState.map) do MuseState.map[k] = nil end
+        for k in pairs(MuseState.order) do MuseState.order[k] = nil end
         MuseState.selected = setDropdownOptions(MuseDropdown, {}, "Enter search text above", function(v)
             MuseState.suppressCallback = v
         end)
@@ -2839,13 +2844,13 @@ runMuseSearch = function(query, silent)
             MuseState.statusActive = true
             setLabelSafe(MuseStatusLabel, "MuseScore Error: " .. tostring(err))
             if not silent then
-                Rayfield:Notify({Title = "MuseScore Search Failed", Content = tostring(err), Duration = 4})
+                notify("MuseScore Search Failed", tostring(err), 4)
             end
             return
         end
 
-        table.clear(MuseState.map)
-        table.clear(MuseState.order)
+        for k in pairs(MuseState.map) do MuseState.map[k] = nil end
+        for k in pairs(MuseState.order) do MuseState.order[k] = nil end
 
         for _, item in ipairs(results) do
             local baseLabel = string.format("%s (#%s)", item.title, item.id)
@@ -2870,31 +2875,32 @@ runMuseSearch = function(query, silent)
     end)
 end
 
-local MuseSearchInput = ExternalTab:CreateInput({
-    Name = "🔍 Search MuseScore",
-    CurrentValue = "",
-    PlaceholderText = "Search score title & press Enter",
-    RemoveTextAfterFocusLost = false,
-    Flag = "MuseSearchInput",
+local MuseSearchInput = MuseBox:AddInput("MuseSearchInput", {
+    Text = "🔍 Search MuseScore",
+    Default = "",
+    Placeholder = "Search score title & press Enter",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         runMuseSearch(Text, false)
     end,
 })
 
-ExternalTab:CreateButton({
-    Name = "🔄 Clear MuseScore Search",
-    Callback = function()
-        pcall(function() MuseSearchInput:Set("") end)
+MuseBox:AddButton({
+    Text = "🔄 Clear MuseScore Search",
+    Func = function()
+        pcall(function() MuseSearchInput:SetValue("") end)
         runMuseSearch("", false)
     end,
 })
 
-MuseDropdown = ExternalTab:CreateDropdown({
-    Name = "MuseScore Results",
-    Options = {"Search MuseScore above"},
-    CurrentOption = {"Search MuseScore above"},
-    MultipleOptions = false,
-    Flag = "MuseScoreSelect",
+MuseDropdown = MuseBox:AddDropdown("MuseScoreSelect", {
+    Text = "MuseScore Results",
+    Values = {"Search MuseScore above"},
+    Default = "Search MuseScore above",
+    Multi = false,
+    Searchable = true,
+    MaxVisibleDropdownItems = 12,
     Callback = function(Option)
         local chosen = type(Option) == "table" and Option[1] or Option
         MuseState.selected = MuseState.map[chosen] and chosen or nil
@@ -2904,32 +2910,31 @@ MuseDropdown = ExternalTab:CreateDropdown({
     end,
 })
 
-ExternalTab:CreateToggle({
-    Name = "⚡ Auto-Play MuseScore on Select",
-    CurrentValue = false,
-    Flag = "MuseAutoPlayToggle",
+MuseBox:AddToggle("MuseAutoPlayToggle", {
+    Text = "⚡ Auto-Play MuseScore on Select",
+    Default = false,
     Callback = function(Value)
         MuseState.autoPlayOnSelect = Value
     end,
 })
 
-ExternalTab:CreateButton({
-    Name = "▶️ Play Selected MuseScore",
-    Callback = function()
+MuseBox:AddButton({
+    Text = "▶️ Play Selected MuseScore",
+    Func = function()
         local url = MuseState.selected and MuseState.map[MuseState.selected]
         if not url then
-            Rayfield:Notify({Title = "No Score Selected", Content = "Search and select a MuseScore result first.", Duration = 3})
+            notify("No Score Selected", "Search and select a MuseScore result first.", 3)
             return
         end
         playMuseScoreEntry(url, MuseState.selected, false)
     end,
 })
 
-ExternalTab:CreateButton({
-    Name = "⚡ Auto-Try MuseScore Results",
-    Callback = function()
+MuseBox:AddButton({
+    Text = "⚡ Auto-Try MuseScore Results",
+    Func = function()
         if #MuseState.order == 0 then
-            Rayfield:Notify({Title = "No Results", Content = "Search MuseScore first.", Duration = 3})
+            notify("No Results", "Search MuseScore first.", 3)
             return
         end
         local candidates = {}
@@ -2953,11 +2958,14 @@ ExternalTab:CreateButton({
                 end)
                 if playbackId ~= myId then return end
                 if ok and midiBody then
+                    local replayFn = function()
+                        playMuseScoreEntry(entry.url, entry.label, true)
+                    end
                     local played = parseAndPlayMidi(midiBody, myId, function()
                         MuseState.statusActive = true
                         setLabelSafe(MuseStatusLabel, "MuseScore Playing: " .. entry.label)
-                        Rayfield:Notify({Title = "MuseScore Playing", Content = entry.label, Duration = 3})
-                    end, {title = entry.label, subtitle = "MuseScore"})
+                        notify("MuseScore Playing", entry.label, 3)
+                    end, {title = entry.label, subtitle = "MuseScore"}, replayFn)
                     if playbackId ~= myId then return end
                     if played then
                         updateMuseStatusLabel()
@@ -2968,34 +2976,37 @@ ExternalTab:CreateButton({
             if playbackId == myId then
                 setHudFailed("No playable MuseScore MIDI found")
                 updateMuseStatusLabel()
-                Rayfield:Notify({Title = "MuseScore Auto-Try Failed", Content = "No playable MIDI found in current results.", Duration = 4})
+                notify("MuseScore Auto-Try Failed", "No playable MIDI found in current results.", 4)
             end
         end)
     end,
 })
 
 local customMuseUrl = ""
-ExternalTab:CreateInput({
-    Name = "MuseScore URL or Score ID",
-    CurrentValue = "",
-    PlaceholderText = "https://musescore.com/user/.../scores/5352121 or 5352121",
-    RemoveTextAfterFocusLost = false,
-    Flag = "CustomMuseUrl",
+MuseBox:AddInput("CustomMuseUrl", {
+    Text = "MuseScore URL or Score ID",
+    Default = "",
+    Placeholder = "https://musescore.com/user/.../scores/5352121 or 5352121",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         customMuseUrl = Text
     end,
 })
 
-ExternalTab:CreateButton({
-    Name = "▶️ Play MuseScore URL / ID",
-    Callback = function()
+MuseBox:AddButton({
+    Text = "▶️ Play MuseScore URL / ID",
+    Func = function()
         playMuseScoreEntry(customMuseUrl, nil, false)
     end,
 })
 
-ExternalTab:CreateSection("MidiShow (Search & Direct MIDI URL)")
+local MidiShowBox = ExternalTab:AddGroupbox({
+    Side = "Left",
+    Name = "MidiShow (Search & Direct MIDI URL)",
+})
 
-local MidiShowStatusLabel = ExternalTab:CreateLabel("MidiShow: Enter a search term or midishow.com URL")
+local MidiShowStatusLabel = MidiShowBox:AddLabel("MidiShowStatusLabel", { Text = "MidiShow: Enter a search term or midishow.com URL" })
 local MidiShowDropdown -- forward declared
 
 local function updateMidiShowStatusLabel()
@@ -3016,10 +3027,10 @@ registerStopHook(function()
 end)
 
 local function playMidiShowEntry(rawUrlOrId, displayName, silent)
-    local target = normalizeMidiShowInput(rawUrlOrId)
-    if not target or not isMidiShowUrl(target) then
+    local target = Core.normalizeMidiShowInput(rawUrlOrId)
+    if not target or not Core.isMidiShowUrl(target) then
         if not silent then
-            Rayfield:Notify({Title = "Invalid MidiShow Input", Content = "Enter a valid midishow.com URL or numeric MIDI ID.", Duration = 3})
+            notify("Invalid MidiShow Input", "Enter a valid midishow.com URL or numeric MIDI ID.", 3)
         end
         return
     end
@@ -3028,6 +3039,10 @@ local function playMidiShowEntry(rawUrlOrId, displayName, silent)
     stopPlayback()
     local myId = playbackId
     setHudLoading(titleText, "MidiShow")
+
+    local replayFn = function()
+        playMidiShowEntry(target, displayName, silent)
+    end
 
     task.spawn(function()
         MidiShowState.statusActive = true
@@ -3041,7 +3056,7 @@ local function playMidiShowEntry(rawUrlOrId, displayName, silent)
             local played = parseAndPlayMidi(midiBody, myId, function()
                 MidiShowState.statusActive = true
                 setLabelSafe(MidiShowStatusLabel, "MidiShow Playing: " .. titleText)
-            end, {title = titleText, subtitle = "MidiShow"})
+            end, {title = titleText, subtitle = "MidiShow"}, replayFn)
             if playbackId ~= myId then return end
             if played then
                 updateMidiShowStatusLabel()
@@ -3049,7 +3064,7 @@ local function playMidiShowEntry(rawUrlOrId, displayName, silent)
                 MidiShowState.statusActive = true
                 setLabelSafe(MidiShowStatusLabel, "MidiShow: Invalid MIDI data")
                 if not silent then
-                    Rayfield:Notify({Title = "MidiShow Parse Error", Content = "Decoded MIDI could not be parsed.", Duration = 4})
+                    notify("MidiShow Parse Error", "Decoded MIDI could not be parsed.", 4)
                 end
             end
         else
@@ -3057,7 +3072,7 @@ local function playMidiShowEntry(rawUrlOrId, displayName, silent)
             setLabelSafe(MidiShowStatusLabel, "MidiShow Failed: " .. tostring(err))
             setHudFailed("Load failed")
             if not silent then
-                Rayfield:Notify({Title = "MidiShow Load Failed", Content = tostring(err), Duration = 5})
+                notify("MidiShow Load Failed", tostring(err), 5)
             end
         end
     end)
@@ -3071,8 +3086,8 @@ runMidiShowSearch = function(query, silent)
 
     if clean == "" then
         MidiShowState.searching = false
-        table.clear(MidiShowState.map)
-        table.clear(MidiShowState.order)
+        for k in pairs(MidiShowState.map) do MidiShowState.map[k] = nil end
+        for k in pairs(MidiShowState.order) do MidiShowState.order[k] = nil end
         MidiShowState.selected = setDropdownOptions(MidiShowDropdown, {}, "Enter search text above", function(v)
             MidiShowState.suppressCallback = v
         end)
@@ -3093,13 +3108,13 @@ runMidiShowSearch = function(query, silent)
             MidiShowState.statusActive = true
             setLabelSafe(MidiShowStatusLabel, "MidiShow Error: " .. tostring(err))
             if not silent then
-                Rayfield:Notify({Title = "MidiShow Search Failed", Content = tostring(err), Duration = 5})
+                notify("MidiShow Search Failed", tostring(err), 5)
             end
             return
         end
 
-        table.clear(MidiShowState.map)
-        table.clear(MidiShowState.order)
+        for k in pairs(MidiShowState.map) do MidiShowState.map[k] = nil end
+        for k in pairs(MidiShowState.order) do MidiShowState.order[k] = nil end
 
         for _, item in ipairs(results) do
             local baseLabel = string.format("%s (#%s)", item.title, item.id)
@@ -3124,31 +3139,32 @@ runMidiShowSearch = function(query, silent)
     end)
 end
 
-local MidiShowSearchInput = ExternalTab:CreateInput({
-    Name = "🔍 Search MidiShow",
-    CurrentValue = "",
-    PlaceholderText = "Search midishow.com & press Enter",
-    RemoveTextAfterFocusLost = false,
-    Flag = "MidiShowSearchInput",
+local MidiShowSearchInput = MidiShowBox:AddInput("MidiShowSearchInput", {
+    Text = "🔍 Search MidiShow",
+    Default = "",
+    Placeholder = "Search midishow.com & press Enter",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         runMidiShowSearch(Text, false)
     end,
 })
 
-ExternalTab:CreateButton({
-    Name = "🔄 Clear MidiShow Search",
-    Callback = function()
-        pcall(function() MidiShowSearchInput:Set("") end)
+MidiShowBox:AddButton({
+    Text = "🔄 Clear MidiShow Search",
+    Func = function()
+        pcall(function() MidiShowSearchInput:SetValue("") end)
         runMidiShowSearch("", false)
     end,
 })
 
-MidiShowDropdown = ExternalTab:CreateDropdown({
-    Name = "MidiShow Results",
-    Options = {"Search MidiShow above"},
-    CurrentOption = {"Search MidiShow above"},
-    MultipleOptions = false,
-    Flag = "MidiShowSelect",
+MidiShowDropdown = MidiShowBox:AddDropdown("MidiShowSelect", {
+    Text = "MidiShow Results",
+    Values = {"Search MidiShow above"},
+    Default = "Search MidiShow above",
+    Multi = false,
+    Searchable = true,
+    MaxVisibleDropdownItems = 12,
     Callback = function(Option)
         local chosen = type(Option) == "table" and Option[1] or Option
         MidiShowState.selected = MidiShowState.map[chosen] and chosen or nil
@@ -3158,32 +3174,31 @@ MidiShowDropdown = ExternalTab:CreateDropdown({
     end,
 })
 
-ExternalTab:CreateToggle({
-    Name = "⚡ Auto-Play MidiShow on Select",
-    CurrentValue = false,
-    Flag = "MidiShowAutoPlayToggle",
+MidiShowBox:AddToggle("MidiShowAutoPlayToggle", {
+    Text = "⚡ Auto-Play MidiShow on Select",
+    Default = false,
     Callback = function(Value)
         MidiShowState.autoPlayOnSelect = Value
     end,
 })
 
-ExternalTab:CreateButton({
-    Name = "▶️ Play Selected MidiShow",
-    Callback = function()
+MidiShowBox:AddButton({
+    Text = "▶️ Play Selected MidiShow",
+    Func = function()
         local url = MidiShowState.selected and MidiShowState.map[MidiShowState.selected]
         if not url then
-            Rayfield:Notify({Title = "No MIDI Selected", Content = "Search and select a MidiShow result first.", Duration = 3})
+            notify("No MIDI Selected", "Search and select a MidiShow result first.", 3)
             return
         end
         playMidiShowEntry(url, MidiShowState.selected, false)
     end,
 })
 
-ExternalTab:CreateButton({
-    Name = "⚡ Auto-Try MidiShow Results",
-    Callback = function()
+MidiShowBox:AddButton({
+    Text = "⚡ Auto-Try MidiShow Results",
+    Func = function()
         if #MidiShowState.order == 0 then
-            Rayfield:Notify({Title = "No Results", Content = "Search MidiShow first.", Duration = 3})
+            notify("No Results", "Search MidiShow first.", 3)
             return
         end
         local candidates = {}
@@ -3207,11 +3222,14 @@ ExternalTab:CreateButton({
                 end)
                 if playbackId ~= myId then return end
                 if ok and midiBody then
+                    local replayFn = function()
+                        playMidiShowEntry(entry.url, entry.label, true)
+                    end
                     local played = parseAndPlayMidi(midiBody, myId, function()
                         MidiShowState.statusActive = true
                         setLabelSafe(MidiShowStatusLabel, "MidiShow Playing: " .. entry.label)
-                        Rayfield:Notify({Title = "MidiShow Playing", Content = entry.label, Duration = 3})
-                    end, {title = entry.label, subtitle = "MidiShow"})
+                        notify("MidiShow Playing", entry.label, 3)
+                    end, {title = entry.label, subtitle = "MidiShow"}, replayFn)
                     if playbackId ~= myId then return end
                     if played then
                         updateMidiShowStatusLabel()
@@ -3222,53 +3240,56 @@ ExternalTab:CreateButton({
             if playbackId == myId then
                 setHudFailed("No playable MidiShow MIDI found")
                 updateMidiShowStatusLabel()
-                Rayfield:Notify({Title = "MidiShow Auto-Try Failed", Content = "No playable MIDI found in current results.", Duration = 4})
+                notify("MidiShow Auto-Try Failed", "No playable MIDI found in current results.", 4)
             end
         end)
     end,
 })
 
 local customMidiShowUrl = ""
-ExternalTab:CreateInput({
-    Name = "MidiShow URL or MIDI ID",
-    CurrentValue = "",
-    PlaceholderText = "https://www.midishow.com/en/midi/36409.html or 36409",
-    RemoveTextAfterFocusLost = false,
-    Flag = "CustomMidiShowUrl",
+MidiShowBox:AddInput("CustomMidiShowUrl", {
+    Text = "MidiShow URL or MIDI ID",
+    Default = "",
+    Placeholder = "https://www.midishow.com/en/midi/36409.html or 36409",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         customMidiShowUrl = Text
     end,
 })
 
-ExternalTab:CreateButton({
-    Name = "▶️ Play MidiShow URL / ID",
-    Callback = function()
+MidiShowBox:AddButton({
+    Text = "▶️ Play MidiShow URL / ID",
+    Func = function()
         playMidiShowEntry(customMidiShowUrl, nil, false)
     end,
 })
 
-ExternalTab:CreateInput({
-    Name = "MidiShow Cookie (Optional, if 403/Cloudflare)",
-    CurrentValue = "",
-    PlaceholderText = "Paste midishow.com Cookie header if required",
-    RemoveTextAfterFocusLost = false,
-    Flag = "MidiShowCookieInput",
+MidiShowBox:AddInput("MidiShowCookieInput", {
+    Text = "MidiShow Cookie (Optional, if 403/Cloudflare)",
+    Default = "",
+    Placeholder = "Paste midishow.com Cookie header if required",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         MidiShowState.cookie = tostring(Text or ""):match("^%s*(.-)%s*$")
     end,
 })
 
-ExternalTab:CreateButton({
-    Name = "⏹️ Stop",
-    Callback = stopPlayback,
+MidiShowBox:AddButton({
+    Text = "⏹️ Stop",
+    Func = stopPlayback,
 })
 
 -- ==========================================
 -- Tab 5: Global Search & Auto-Try Across All Sources
 -- ==========================================
-GlobalTab:CreateSection("Search All Sources (Local + Quick Picks + NanoMIDI + MuseScore + MidiShow)")
+local GlobalBox = GlobalTab:AddGroupbox({
+    Side = "Left",
+    Name = "Search All Sources (Local + Quick Picks + NanoMIDI + MuseScore + MidiShow)",
+})
 
-local GlobalStatusLabel = GlobalTab:CreateLabel("Global Search: Enter a song name to search all sources")
+local GlobalStatusLabel = GlobalBox:AddLabel("GlobalStatusLabel", { Text = "Global Search: Enter a song name to search all sources" })
 local GlobalDropdown -- forward declared
 
 local function updateGlobalStatusLabel()
@@ -3302,7 +3323,7 @@ local function buildGlobalMatches(query)
     local totalMatches = 0
 
     local function addEntry(sourceTag, label, entry)
-        if not matchesQuery(label, query) then return end
+        if not Core.matchesQuery(label, query) then return end
         totalMatches = totalMatches + 1
         if #displayNames >= MAX_DROPDOWN_ITEMS then return end
 
@@ -3346,7 +3367,7 @@ local function buildGlobalMatches(query)
             addEntry("NanoMIDI", label, {
                 kind = "nano",
                 label = label,
-                url = "https://api.nanomidi.net/api/midis/" .. encodeUrlPath(tostring(song.midiFilename)),
+                url = "https://api.nanomidi.net/api/midis/" .. Core.encodeUrlPath(tostring(song.midiFilename)),
             })
         end
     end
@@ -3400,12 +3421,12 @@ local function tryLoadGlobalEntry(entry, myId)
     end
 end
 
-local GlobalSearchInput = GlobalTab:CreateInput({
-    Name = "🔍 Search All Songs",
-    CurrentValue = "",
-    PlaceholderText = "e.g. unravel, megalovania, chopin (press Enter)",
-    RemoveTextAfterFocusLost = false,
-    Flag = "GlobalSearchInput",
+local GlobalSearchInput = GlobalBox:AddInput("GlobalSearchInput", {
+    Text = "🔍 Search All Songs",
+    Default = "",
+    Placeholder = "e.g. unravel, megalovania, chopin (press Enter)",
+    ClearTextOnFocus = false,
+    Finished = true,
     Callback = function(Text)
         GlobalState.query = tostring(Text or "")
         if not NanoState.loaded and not NanoState.loadingList then
@@ -3426,21 +3447,21 @@ local GlobalSearchInput = GlobalTab:CreateInput({
     end,
 })
 
-GlobalTab:CreateToggle({
-    Name = "🌐 Live Search MuseScore & MidiShow",
-    CurrentValue = true,
-    Flag = "GlobalLiveExternalToggle",
+GlobalBox:AddToggle("GlobalLiveExternalToggle", {
+    Text = "🌐 Live Search MuseScore & MidiShow",
+    Default = true,
     Callback = function(Value)
         GlobalState.liveExternalSearch = Value
     end,
 })
 
-GlobalDropdown = GlobalTab:CreateDropdown({
-    Name = "Matching Songs",
-    Options = {"Loading..."},
-    CurrentOption = {"Loading..."},
-    MultipleOptions = false,
-    Flag = "GlobalSongSelect",
+GlobalDropdown = GlobalBox:AddDropdown("GlobalSongSelect", {
+    Text = "Matching Songs",
+    Values = {"Loading..."},
+    Default = "Loading...",
+    Multi = false,
+    Searchable = true,
+    MaxVisibleDropdownItems = 12,
     Callback = function(Option)
         local chosen = type(Option) == "table" and Option[1] or Option
         GlobalState.selected = GlobalState.resultsMap[chosen] and chosen or nil
@@ -3449,53 +3470,67 @@ GlobalDropdown = GlobalTab:CreateDropdown({
 
 refreshGlobalSearchResults()
 
-GlobalTab:CreateButton({
-    Name = "▶️ Play Selected Match",
-    Callback = function()
-        local entry = GlobalState.selected and GlobalState.resultsMap[GlobalState.selected]
-        if not entry then
-            Rayfield:Notify({Title = "No Song Selected", Content = "Search and select a song first.", Duration = 3})
-            return
+local function globalPlayEntry(entry)
+    stopPlayback()
+    local myId = playbackId
+    setHudLoading(entry.label or entry.display, entry.source or "Global Search")
+
+    local replayFn
+    if entry.kind == "local" then
+        replayFn = function()
+            playLocalSelection(entry.label)
         end
+    else
+        replayFn = function()
+            globalPlayEntry(entry)
+        end
+    end
 
-        stopPlayback()
-        local myId = playbackId
-        setHudLoading(entry.label or entry.display, entry.source or "Global Search")
+    task.spawn(function()
+        GlobalState.statusActive = true
+        setLabelSafe(GlobalStatusLabel, "Loading: " .. entry.display)
+        local ok, midiBody = tryLoadGlobalEntry(entry, myId)
+        if playbackId ~= myId then return end
 
-        task.spawn(function()
-            GlobalState.statusActive = true
-            setLabelSafe(GlobalStatusLabel, "Loading: " .. entry.display)
-            local ok, midiBody = tryLoadGlobalEntry(entry, myId)
+        if ok and midiBody then
+            local played = parseAndPlayMidi(midiBody, myId, function()
+                GlobalState.statusActive = true
+                setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
+            end, {title = entry.label or entry.display, subtitle = entry.source or "Global Search"}, replayFn)
             if playbackId ~= myId then return end
-
-            if ok and midiBody then
-                local played = parseAndPlayMidi(midiBody, myId, function()
-                    GlobalState.statusActive = true
-                    setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
-                end, {title = entry.label or entry.display, subtitle = entry.source or "Global Search"})
-                if playbackId ~= myId then return end
-                if played then
-                    updateGlobalStatusLabel()
-                else
-                    GlobalState.statusActive = true
-                    setLabelSafe(GlobalStatusLabel, "Invalid MIDI: " .. entry.display)
-                    Rayfield:Notify({Title = "MIDI Parse Error", Content = "Try 'Auto-Try Matching Songs' to test other sources.", Duration = 4})
-                end
+            if played then
+                updateGlobalStatusLabel()
             else
                 GlobalState.statusActive = true
-                setLabelSafe(GlobalStatusLabel, "Failed: " .. entry.display)
-                setHudFailed("Load failed")
-                Rayfield:Notify({Title = "Song Load Failed", Content = "Try 'Auto-Try Matching Songs' to test other sources.", Duration = 4})
+                setLabelSafe(GlobalStatusLabel, "Invalid MIDI: " .. entry.display)
+                notify("MIDI Parse Error", "Try 'Auto-Try Matching Songs' to test other sources.", 4)
             end
-        end)
+        else
+            GlobalState.statusActive = true
+            setLabelSafe(GlobalStatusLabel, "Failed: " .. entry.display)
+            setHudFailed("Load failed")
+            notify("Song Load Failed", "Try 'Auto-Try Matching Songs' to test other sources.", 4)
+        end
+    end)
+end
+
+GlobalBox:AddButton({
+    Text = "▶️ Play Selected Match",
+    Func = function()
+        local entry = GlobalState.selected and GlobalState.resultsMap[GlobalState.selected]
+        if not entry then
+            notify("No Song Selected", "Search and select a song first.", 3)
+            return
+        end
+        globalPlayEntry(entry)
     end,
 })
 
-GlobalTab:CreateButton({
-    Name = "⚡ Auto-Try Matching Songs (Find Working)",
-    Callback = function()
+GlobalBox:AddButton({
+    Text = "⚡ Auto-Try Matching Songs (Find Working)",
+    Func = function()
         if #GlobalState.resultsOrder == 0 then
-            Rayfield:Notify({Title = "No Matches", Content = "No songs matched your search.", Duration = 3})
+            notify("No Matches", "No songs matched your search.", 3)
             return
         end
 
@@ -3520,11 +3555,14 @@ GlobalTab:CreateButton({
                 if playbackId ~= myId then return end
 
                 if ok and midiBody then
+                    local replayFn = function()
+                        globalPlayEntry(entry)
+                    end
                     local played = parseAndPlayMidi(midiBody, myId, function()
                         GlobalState.statusActive = true
                         setLabelSafe(GlobalStatusLabel, "Playing: " .. entry.display)
-                        Rayfield:Notify({Title = "Auto-Loaded & Playing", Content = entry.display, Duration = 3})
-                    end, {title = entry.label or entry.display, subtitle = entry.source or "Global Search"})
+                        notify("Auto-Loaded & Playing", entry.display, 3)
+                    end, {title = entry.label or entry.display, subtitle = entry.source or "Global Search"}, replayFn)
                     if playbackId ~= myId then return end
                     if played then
                         updateGlobalStatusLabel()
@@ -3537,15 +3575,15 @@ GlobalTab:CreateButton({
                 GlobalState.statusActive = true
                 setLabelSafe(GlobalStatusLabel, "Auto-try finished: no working MIDI found")
                 setHudFailed("No working MIDI found")
-                Rayfield:Notify({Title = "Auto-Try Failed", Content = "None of the matching entries returned valid MIDI.", Duration = 4})
+                notify("Auto-Try Failed", "None of the matching entries returned valid MIDI.", 4)
             end
         end)
     end,
 })
 
-GlobalTab:CreateButton({
-    Name = "🔄 Reload All Song Sources",
-    Callback = function()
+GlobalBox:AddButton({
+    Text = "🔄 Reload All Song Sources",
+    Func = function()
         scanLocalMidiFiles()
         applyLocalFilter()
         fetchFromRepoUrl(QuickState.repoUrl, false)
@@ -3554,18 +3592,18 @@ GlobalTab:CreateButton({
     end,
 })
 
-GlobalTab:CreateButton({
-    Name = "🔄 Clear Search",
-    Callback = function()
+GlobalBox:AddButton({
+    Text = "🔄 Clear Search",
+    Func = function()
         GlobalState.query = ""
-        pcall(function() GlobalSearchInput:Set("") end)
+        pcall(function() GlobalSearchInput:SetValue("") end)
         refreshGlobalSearchResults()
     end,
 })
 
-GlobalTab:CreateButton({
-    Name = "⏹️ Stop",
-    Callback = stopPlayback,
+GlobalBox:AddButton({
+    Text = "⏹️ Stop",
+    Func = stopPlayback,
 })
 
 -- ==========================================
@@ -3702,6 +3740,21 @@ local function createOnscreenPlayerHud()
     subtitleLabel.TextXAlignment = Enum.TextXAlignment.Left
     subtitleLabel.TextTruncate = Enum.TextTruncate.AtEnd
     subtitleLabel.Parent = leftSection
+
+    -- Next-note highlight badge (shown when highlight-next is enabled).
+    local nextNoteLabel = Instance.new("TextLabel")
+    nextNoteLabel.Name = "NextNoteLabel"
+    nextNoteLabel.Position = UDim2.new(0, 48, 0, 47)
+    nextNoteLabel.Size = UDim2.new(1, -48, 0, 16)
+    nextNoteLabel.BackgroundTransparency = 1
+    nextNoteLabel.Text = ""
+    nextNoteLabel.Font = Enum.Font.GothamBold
+    nextNoteLabel.TextSize = 11
+    nextNoteLabel.TextColor3 = Color3.fromRGB(86, 180, 255)
+    nextNoteLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nextNoteLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    nextNoteLabel.Visible = false
+    nextNoteLabel.Parent = leftSection
 
     -- Center Section: Transport buttons + Elapsed / Progress Bar / Total Length
     local centerSection = Instance.new("Frame")
@@ -3998,7 +4051,7 @@ local function createOnscreenPlayerHud()
     closeBtn.MouseButton1Click:Connect(function()
         PlayerHudState.enabled = false
         pcall(function()
-            ShowPlayerHudToggle:Set(false)
+            ShowPlayerHudToggle:SetValue(false)
         end)
     end)
 
@@ -4084,7 +4137,11 @@ local function createOnscreenPlayerHud()
                 if not barHovered then
                     trackFill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
                 end
-                if playing and PlayerHudState.totalTime > 0 then
+                -- Seek commits while playing OR paused: the playback loop
+                -- applies seekTarget in both states, so the preview should
+                -- never snap back when the song is paused.
+                if PlayerHudState.totalTime > 0
+                    and (PlayerHudState.status == "playing" or PlayerHudState.status == "paused") then
                     PlayerHudState.seekTarget = PlayerHudState.dragPreviewTime
                 end
             end
@@ -4118,6 +4175,14 @@ local function createOnscreenPlayerHud()
         end
         subtitleLabel.Text = statusPrefix .. PlayerHudState.subtitle
 
+        -- Next-note highlight badge.
+        if PlayerHudState.highlightNext and PlayerHudState.nextNoteChars then
+            nextNoteLabel.Visible = true
+            nextNoteLabel.Text = "Next: " .. table.concat(PlayerHudState.nextNoteChars, " ")
+        else
+            nextNoteLabel.Visible = false
+        end
+
         local isPlayingNow = (PlayerHudState.status == "playing")
         playGlyph.Visible = not isPlayingNow
         pauseGlyph.Visible = isPlayingNow
@@ -4143,4 +4208,3 @@ local function createOnscreenPlayerHud()
 end
 
 createOnscreenPlayerHud()
-
