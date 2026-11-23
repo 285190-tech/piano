@@ -183,9 +183,9 @@ do
     end
     check("0xF1 consumed its data byte (noteOn still parsed)", f1NoteOn)
 
-    -- 0xF7 (EOX) carries NO data bytes; a following note must still parse.
+    -- In a Standard MIDI File, 0xF7 is followed by a VLQ length and data.
     local f7Track = table.concat({
-        vlq(0) .. string.char(0xF7),
+        vlq(0) .. string.char(0xF7) .. vlq(3) .. string.char(0x43, 0x12, 0x00),
         vlq(1) .. string.char(0x90, 0x40, 0x7F),
         vlq(0) .. metaEvent(0x2F, ""),
     })
@@ -198,7 +198,12 @@ do
     for _, ev in ipairs(gotF7) do
         if ev.name == "noteOn" and ev.args[2] == 64 then f7NoteOn = true end
     end
-    check("0xF7 consumed no data (noteOn still parsed)", f7NoteOn)
+    check("0xF7 consumed length and data (noteOn still parsed)", f7NoteOn)
+    local f7Data
+    for _, ev in ipairs(gotF7) do
+        if ev.name == "eox" then f7Data = ev.args[1] end
+    end
+    eq("0xF7 payload", f7Data, string.char(0x43, 0x12, 0x00))
 end
 
 -- ==========================================
