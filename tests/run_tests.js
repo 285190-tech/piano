@@ -2,7 +2,7 @@
 // Runs tests/run_tests.lua with fengari (Lua 5.3 implemented in JavaScript),
 // for environments without a Lua interpreter installed.
 //
-//   cd tests && npm install && node run_tests.js
+//   cd tests && npm ci && node run_tests.js
 
 const fs = require("fs");
 const path = require("path");
@@ -83,6 +83,19 @@ if bit32 == nil then
 end
 `;
 run(BIT32_SHIM, "bit32 shim");
+
+// piano.lua depends on Roblox globals and cannot execute in this harness, but
+// Fengari can still compile it and catch ordinary Lua syntax errors in CI.
+{
+    const pianoSource = fs.readFileSync(path.join(__dirname, "..", "piano.lua"), "utf8");
+    const syntaxState = lauxlib.luaL_newstate();
+    const syntaxStatus = lauxlib.luaL_loadstring(syntaxState, to_luastring(pianoSource));
+    if (syntaxStatus !== 0) {
+        const msg = lua.lua_tolstring(syntaxState, -1, null);
+        throw new Error(`Failed to compile piano.lua: ${to_jsstring(msg)}`);
+    }
+    console.log("piano.lua: syntax OK (fengari)");
+}
 
 try {
     // Load core.lua and expose the returned module as a global so the

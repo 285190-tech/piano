@@ -218,6 +218,8 @@ local function processEvent(stream, callback, runningStatus)
             read(stream, 1)
             return 2, runningStatus
         elseif status == 0xF7 then
+            -- In a Standard MIDI File, F7 introduces an escaped event whose
+            -- payload is preceded by a variable-length byte count.
             local dataLen, vlqLen = readVLQ(stream)
             local data = read(stream, dataLen)
             callback("eox", data, status)
@@ -333,7 +335,8 @@ end
 Core.encodeQueryParam = encodeQueryParam
 
 local function deriveTitleFromUrl(url)
-    local lastSeg = tostring(url or ""):match("([^/%?#]+)%s*$") or "Direct URL"
+    local cleanUrl = tostring(url or ""):match("^([^?#]*)") or ""
+    local lastSeg = cleanUrl:match("([^/]+)%s*$") or "Direct URL"
     lastSeg = lastSeg:gsub("%.midi?$", ""):gsub("%%(%x%x)", function(hex)
         return string.char(tonumber(hex, 16))
     end)
@@ -767,5 +770,237 @@ local function normalizeMidiShowInput(input)
     return clean
 end
 Core.normalizeMidiShowInput = normalizeMidiShowInput
+
+-- Compute real-valued song timestamps (seconds at 1.0x speed) for each event
+-- in a MIDI timeline. Events carry `time` (in ticks); tempo events carry
+-- `type == "tempo"` and `tempo` (microseconds per quarter note). Annotates
+-- each event with `songTime` and returns the total duration in seconds.
+-- `division` is ticks per quarter note (or SMPTE-encoded), `isSmpte` flags
+-- SMPTE division, and `smpteTicksPerSec` is ticks per second for SMPTE.
+local function buildTimeline(events, division, isSmpte, smpteTicksPerSec)
+    local preTempo = 500000
+    local prevTick = 0
+    local songSec = 0
+    for _, ev in ipairs(events) do
+        local dt = ev.time - prevTick
+        if dt > 0 then
+            local spt = isSmpte and (1 / smpteTicksPerSec) or ((preTempo / 1000000) / division)
+            songSec = songSec + dt * spt
+            prevTick = ev.time
+        end
+        ev.songTime = songSec
+        -- A tempo event applies from its own tick onward: events at the same
+        -- tick already got their delta computed with the previous tempo.
+        if ev.type == "tempo" and ev.tempo > 0 then
+            preTempo = ev.tempo
+        end
+    end
+    return songSec
+end
+Core.buildTimeline = buildTimeline
+
+-- Parse a text sheet into a sorted event list. `isValidChar(c)` reports
+-- whether a character maps to a playable key. Returns the events and the
+-- total duration in seconds. Chords are `[abc]`, arpeggios `[a b c]`, and
+-- each space/`-`/`|`/newline advances one beat.
+local function buildTextSheetEvents(sheet, bpm, isValidChar)
+    local baseStep = 60 / math.max(tonumber(bpm) or 120, 1) / 2
+    local events = {}
+    local songSec = 0
+    local nextNoteId = 0
+    local i = 1
+    local len = #sheet
+
+    local function emitPress(chars)
+        nextNoteId = nextNoteId + 1
+        local noteId = nextNoteId
+        table.insert(events, {songTime = songSec, kind = "press", chars = chars, velocity = 0.7, noteId = noteId})
+        -- Synthetic release shortly after the press (text sheets have no
+        -- noteOff events; this gives a natural staccato feel).
+        local hold = math.min(baseStep * 0.7, 0.2)
+        table.insert(events, {songTime = songSec + hold, kind = "release", chars = chars, noteId = noteId})
+    end
+
+    while i <= len do
+        local ch = sheet:sub(i, i)
+        if ch == "[" then
+            local closeIdx = sheet:find("]", i + 1, true)
+            if closeIdx then
+                local group = sheet:sub(i + 1, closeIdx - 1)
+                if group:find(" ") then
+                    -- Arpeggio: each character is played in sequence.
+                    for j = 1, #group do
+                        local gc = group:sub(j, j)
+                        if isValidChar(gc) then
+                            nextNoteId = nextNoteId + 1
+                            local noteId = nextNoteId
+                            table.insert(events, {songTime = songSec, kind = "press", chars = {gc}, velocity = 0.7, noteId = noteId})
+                            local hold = math.min(baseStep * 0.35, 0.06)
+                            table.insert(events, {songTime = songSec + hold, kind = "release", chars = {gc}, noteId = noteId})
+                            songSec = songSec + hold
+                        end
+                    end
+                    songSec = songSec + baseStep * 0.5
+                else
+                    -- Chord: all characters are pressed simultaneously.
+                    local chord = {}
+                    for j = 1, #group do
+                        local gc = group:sub(j, j)
+                        if isValidChar(gc) then
+                            table.insert(chord, gc)
+                        end
+                    end
+                    if #chord > 0 then
+                        emitPress(chord)
+                    end
+                    songSec = songSec + baseStep
+                end
+                i = closeIdx + 1
+            else
+                i = i + 1
+            end
+        elseif ch == " " or ch == "-" or ch == "|" or ch == "\n" then
+            songSec = songSec + baseStep
+            i = i + 1
+        elseif isValidChar(ch) then
+            emitPress({ch})
+            songSec = songSec + baseStep
+            i = i + 1
+        else
+            i = i + 1
+        end
+    end
+
+    table.sort(events, function(a, b)
+        if a.songTime == b.songTime then
+            if a.kind ~= b.kind then
+                return a.kind == "release"
+            end
+            return false
+        end
+        return a.songTime < b.songTime
+    end)
+
+    return events, songSec
+end
+Core.buildTextSheetEvents = buildTextSheetEvents
+
+-- Map an incoming 0..1 velocity through a curve and output range.
+-- `curve` is an exponent (1 = linear); values > 1 bias toward the low end.
+local function mapVelocity(velocity, min, max, curve)
+    local v = velocity or 0.5
+    if v < 0 then v = 0 end
+    if v > 1 then v = 1 end
+    -- Exponential curve: v^curve biases toward the low end when > 1.
+    if curve ~= 1 then
+        v = v ^ curve
+    end
+    return min + v * (max - min)
+end
+Core.mapVelocity = mapVelocity
+
+-- Sort decoded MIDI playback events by tick, preserving the parser's event
+-- order at equal ticks. This is required for zero-duration notes and keeps
+-- same-tick note-on/note-off ordering faithful to the MIDI stream.
+local function sortMidiEvents(events)
+    table.sort(events, function(a, b)
+        if a.time == b.time then
+            return a.order < b.order
+        end
+        return a.time < b.time
+    end)
+    return events
+end
+Core.sortMidiEvents = sortMidiEvents
+
+-- Build sparse snapshots of active note presses for efficient seek restore.
+-- Snapshots represent state immediately before `nextIndex`; seeking starts at
+-- the nearest prior checkpoint and replays only a bounded event suffix.
+local function buildSeekIndex(events, checkpointInterval)
+    checkpointInterval = math.max(1, math.floor(tonumber(checkpointInterval) or 256))
+    local active = {}
+    local checkpoints = {{nextIndex = 1, active = {}}}
+    for i, ev in ipairs(events) do
+        if ev.noteId ~= nil then
+            if ev.kind == "press" then
+                active[ev.noteId] = {event = ev, index = i}
+            elseif ev.kind == "release" then
+                active[ev.noteId] = nil
+            end
+        end
+        if i % checkpointInterval == 0 then
+            local snapshot = {}
+            for noteId, entry in pairs(active) do
+                snapshot[noteId] = entry
+            end
+            checkpoints[#checkpoints + 1] = {nextIndex = i + 1, active = snapshot}
+        end
+    end
+    return {interval = checkpointInterval, checkpoints = checkpoints}
+end
+Core.buildSeekIndex = buildSeekIndex
+
+local function getHeldNotesAtIndex(events, nextIndex, seekIndex)
+    nextIndex = math.max(1, math.min(#events + 1, math.floor(tonumber(nextIndex) or 1)))
+    local checkpoints = seekIndex and seekIndex.checkpoints or {{nextIndex = 1, active = {}}}
+    local lo, hi, chosen = 1, #checkpoints, 1
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        if checkpoints[mid].nextIndex <= nextIndex then
+            chosen = mid
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+
+    local checkpoint = checkpoints[chosen]
+    local active = {}
+    for noteId, entry in pairs(checkpoint.active) do
+        active[noteId] = entry
+    end
+    for i = checkpoint.nextIndex, nextIndex - 1 do
+        local ev = events[i]
+        if ev and ev.noteId ~= nil then
+            if ev.kind == "press" then
+                active[ev.noteId] = {event = ev, index = i}
+            elseif ev.kind == "release" then
+                active[ev.noteId] = nil
+            end
+        end
+    end
+
+    local result = {}
+    for _, entry in pairs(active) do
+        result[#result + 1] = entry
+    end
+    table.sort(result, function(a, b) return a.index < b.index end)
+    return result
+end
+Core.getHeldNotesAtIndex = getHeldNotesAtIndex
+
+-- Pure note-state helpers shared by playback and tests.
+local function releaseActiveNoteToken(tokens, noteToken)
+    if type(tokens) ~= "table" then return false, 0 end
+    local removed = tokens[noteToken] ~= nil
+    if removed then tokens[noteToken] = nil end
+    local count = 0
+    for _ in pairs(tokens) do count = count + 1 end
+    return removed, count
+end
+Core.releaseActiveNoteToken = releaseActiveNoteToken
+
+local function removeVoiceEntries(voices, keyEnum, noteToken)
+    local removed = 0
+    for i = #voices, 1, -1 do
+        local voice = voices[i]
+        if voice.keyEnum == keyEnum and (noteToken == nil or voice.noteToken == noteToken) then
+            table.remove(voices, i)
+            removed = removed + 1
+        end
+    end
+    return removed
+end
+Core.removeVoiceEntries = removeVoiceEntries
 
 return Core

@@ -14,6 +14,8 @@
 --   * Replay closures capture only small source strings, never the MIDI
 --     payload, so stopping a song frees its memory.
 
+local SCRIPT_VERSION = "1.0.0"
+
 local QUICKPICKS_REPO_URL = "https://raw.githubusercontent.com/q-29/piano/refs/heads/main/songs.json"
 local OBSIDIAN_LIBRARY_URL = "https://raw.githubusercontent.com/deividcomsono/Obsidian/refs/heads/main/Library.lua"
 local CORE_LIBRARY_URL = "https://raw.githubusercontent.com/q-29/piano/refs/heads/main/core.lua"
@@ -88,6 +90,7 @@ if not Core then fatalLoadError("core.lua", coreLoadError) end
 -- Virtual Piano Key Mapping & Input
 -- ==========================================
 local startNote = 36
+local compactStartNote = 36
 
 local digitKeyCodes = {
     ["1"] = Enum.KeyCode.One,   ["2"] = Enum.KeyCode.Two,
@@ -102,13 +105,12 @@ local shiftSymbolToDigit = {
     ["^"] = "6", ["&"] = "7", ["*"] = "8", ["("] = "9", [")"] = "0",
 }
 
--- Two keyboard layouts. "full" maps 60 consecutive MIDI notes (36-95) to
--- the full key string; "compact" maps one octave (12 white keys) so it
--- fits a small screen, with octave transposition handled by Shift.
+-- Two keyboard layouts. "full" maps all 61 characters to MIDI notes 36-96.
+-- "compact" maps 12 consecutive notes starting at the user-selected note.
 local layouts = {
     full = {
         keyString = "1!2@34$5%6^78*9(0qQwWeErtTyYuiIoOpPasSdDfgGhHjJklLzZxcCvVbBnm",
-        count = 60,
+        count = 61,
     },
     compact = {
         keyString = "1234qQwWeErtTyY",
@@ -121,13 +123,23 @@ local MidiToChar = {}
 local CharToKeyInfo = {}
 -- keyNote[keyEnum] = MIDI note currently held (for legato / voice stealing)
 local keyNote = {}
--- activeVoices: list of {note, keyEnum, pressId, held} for voice stealing.
+-- activeVoices: one entry per active note press, ordered for voice stealing.
 local activeVoices = {}
 local voiceOrder = 0
+local activeNoteTokens = {}
+
+local function removeVoicesForPress(keyEnum, noteToken)
+    Core.removeVoiceEntries(activeVoices, keyEnum, noteToken)
+end
+
+local function removeVoicesForKey(keyEnum)
+    Core.removeVoiceEntries(activeVoices, keyEnum)
+end
 
 local function buildLayout(layoutName)
     local layout = layouts[layoutName] or layouts.full
     local keys = layout.keyString
+    local layoutStartNote = layoutName == "compact" and compactStartNote or startNote
 
     MidiToChar = {}
     CharToKeyInfo = {}
@@ -140,12 +152,15 @@ local function buildLayout(layoutName)
         local baseChar = mappedDigit or ch:upper()
         local keyEnum = digitKeyCodes[baseChar] or Enum.KeyCode[baseChar]
 
-        MidiToChar[startNote + i - 1] = ch
-        CharToKeyInfo[ch] = {
-            keyEnum = keyEnum,
-            needsShift = needsShift,
-            note = startNote + i - 1,
-        }
+        local note = layoutStartNote + i - 1
+        if note <= 127 then
+            MidiToChar[note] = ch
+            CharToKeyInfo[ch] = {
+                keyEnum = keyEnum,
+                needsShift = needsShift,
+                note = note,
+            }
+        end
     end
 
     -- Re-seed held state so stale mappings don't linger across layouts.
@@ -167,10 +182,14 @@ buildLayout("full")
 
 local keyPressId = {}
 local keyHeld = {}
-local activeNoteId = {}
 -- activePress[keyEnum] = pressId of the press that is currently held,
 -- so a noteOff only releases the key if it belongs to the active press.
 local activePress = {}
+
+-- keyPressCount[keyEnum] = number of outstanding (not yet released) presses
+-- for a key. In legato mode overlapping presses stack; the key is only
+-- released when the count returns to zero.
+local keyPressCount = {}
 
 -- Voice / velocity configuration.
 local MAX_VOICES = 16
@@ -179,30 +198,44 @@ local velocityMin = 0.2
 local velocityMax = 1.0
 local velocityCurve = 1.0 -- exponent applied to velocity before scaling
 
--- Map an incoming 0..1 velocity through the configured curve and range.
-local function mapVelocity(velocity)
-    local v = math.clamp(velocity or 0.5, 0, 1)
-    -- Exponential curve: v^curve biases toward the low end when > 1.
-    if velocityCurve ~= 1 then
-        v = v ^ velocityCurve
-    end
-    return velocityMin + v * (velocityMax - velocityMin)
-end
-
 -- Steal the oldest active voice if we're at the voice ceiling.
 local function enforceVoiceLimit()
     while #activeVoices >= MAX_VOICES do
         local oldest = activeVoices[1]
         if oldest and oldest.keyEnum then
-            if keyHeld[oldest.keyEnum] and activePress[oldest.keyEnum] == oldest.pressId then
-                VirtualInputManager:SendKeyEvent(false, oldest.keyEnum, false, game)
-                keyHeld[oldest.keyEnum] = false
-                activePress[oldest.keyEnum] = nil
-                activeNoteId[oldest.keyEnum] = nil
+            local keyEnum = oldest.keyEnum
+            if keyHeld[keyEnum] then
+                VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
             end
+            keyPressId[keyEnum] = (keyPressId[keyEnum] or 0) + 1
+            keyHeld[keyEnum] = false
+            activePress[keyEnum] = nil
+            keyPressCount[keyEnum] = 0
+            activeNoteTokens[keyEnum] = {}
+            -- Voice stealing operates on the physical key, so clear all
+            -- overlapping legato records for that key together.
+            removeVoicesForKey(keyEnum)
+        else
+            table.remove(activeVoices, 1)
         end
-        table.remove(activeVoices, 1)
     end
+end
+
+local function releaseNoteToken(keyEnum, noteToken)
+    local tokens = activeNoteTokens[keyEnum]
+    local removed, count = Core.releaseActiveNoteToken(tokens, noteToken)
+    if not removed then return false end
+    removeVoicesForPress(keyEnum, noteToken)
+    keyPressCount[keyEnum] = count
+    if count == 0 then
+        if keyHeld[keyEnum] then
+            VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
+        end
+        keyHeld[keyEnum] = false
+        activePress[keyEnum] = nil
+        removeVoicesForKey(keyEnum)
+    end
+    return true
 end
 
 local function pressChar(char, velocity, noteId)
@@ -210,16 +243,20 @@ local function pressChar(char, velocity, noteId)
     if not info or not info.keyEnum then return end
 
     local keyEnum = info.keyEnum
-    local mappedVel = mapVelocity(velocity)
+    local mappedVel = Core.mapVelocity(velocity, velocityMin, velocityMax, velocityCurve)
 
     local pressId = (keyPressId[keyEnum] or 0) + 1
     keyPressId[keyEnum] = pressId
+    local noteToken = tostring(noteId or ("press-" .. tostring(pressId))) .. "\0" .. char
 
     -- Re-triggering the same key: in legato mode the previous press
     -- sustains (overlap); otherwise release it first (re-articulation).
     if keyHeld[keyEnum] and not legatoMode then
         VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
         keyHeld[keyEnum] = false
+        keyPressCount[keyEnum] = 0
+        activeNoteTokens[keyEnum] = {}
+        removeVoicesForKey(keyEnum)
     end
 
     enforceVoiceLimit()
@@ -231,7 +268,9 @@ local function pressChar(char, velocity, noteId)
     VirtualInputManager:SendKeyEvent(true, keyEnum, false, game)
     keyHeld[keyEnum] = true
     activePress[keyEnum] = pressId
-    activeNoteId[keyEnum] = noteId
+    activeNoteTokens[keyEnum] = activeNoteTokens[keyEnum] or {}
+    activeNoteTokens[keyEnum][noteToken] = true
+    keyPressCount[keyEnum] = (keyPressCount[keyEnum] or 0) + 1
     keyNote[keyEnum] = info.note
 
     -- Track this voice for stealing.
@@ -240,6 +279,7 @@ local function pressChar(char, velocity, noteId)
         note = info.note,
         keyEnum = keyEnum,
         pressId = pressId,
+        noteToken = noteToken,
         order = voiceOrder,
     })
 
@@ -247,18 +287,13 @@ local function pressChar(char, velocity, noteId)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
     end
 
-    -- Safety net: if the file never sends a matching noteOff, release
-    -- after FALLBACK_HOLD_SECONDS. A real noteOff bumps keyPressId first,
-    -- which makes this delayed release a no-op.
-    -- Mapped velocity => hold length, so louder notes ring a bit longer.
+    -- Safety net: if the file never sends a matching noteOff, release this
+    -- individual press after a velocity-scaled fallback hold.
     local hold = FALLBACK_HOLD_SECONDS * (0.6 + 0.8 * math.clamp(mappedVel, 0, 1))
     task.delay(hold, function()
-        if keyPressId[keyEnum] == pressId and keyHeld[keyEnum] then
-            VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
-            keyHeld[keyEnum] = false
-            activePress[keyEnum] = nil
-            activeNoteId[keyEnum] = nil
-        end
+        -- Release only this press. In legato mode another overlapping note
+        -- may still be holding the same physical key.
+        releaseNoteToken(keyEnum, noteToken)
     end)
 end
 
@@ -267,20 +302,8 @@ local function releaseChar(char, noteId)
     if not info or not info.keyEnum then return end
 
     local keyEnum = info.keyEnum
-    if keyHeld[keyEnum] and activePress[keyEnum] == keyPressId[keyEnum]
-        and activeNoteId[keyEnum] == noteId then
-        VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
-        keyHeld[keyEnum] = false
-        activePress[keyEnum] = nil
-        activeNoteId[keyEnum] = nil
-        -- Drop the matching voice entry.
-        for i = #activeVoices, 1, -1 do
-            if activeVoices[i].keyEnum == keyEnum and activeVoices[i].pressId == keyPressId[keyEnum] then
-                table.remove(activeVoices, i)
-                break
-            end
-        end
-    end
+    local noteToken = tostring(noteId or "") .. "\0" .. char
+    releaseNoteToken(keyEnum, noteToken)
 end
 
 -- ==========================================
@@ -341,13 +364,16 @@ local function releaseHeldKeys()
             keyPressId[keyEnum] = (keyPressId[keyEnum] or 0) + 1
             keyHeld[keyEnum] = false
             activePress[keyEnum] = nil
-            activeNoteId[keyEnum] = nil
+            keyPressCount[keyEnum] = 0
+            activeNoteTokens[keyEnum] = {}
             pcall(function()
                 VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
             end)
         end
     end
-    table.clear(activeVoices)
+    for i = #activeVoices, 1, -1 do
+        activeVoices[i] = nil
+    end
 end
 
 local function stopPlayback()
@@ -387,7 +413,7 @@ local function findEventIndexAtTime(events, targetTime)
     local ans = #events + 1
     while lo <= hi do
         local mid = math.floor((lo + hi) / 2)
-        if events[mid].songTime >= targetTime then
+        if events[mid].songTime >= targetTime - 0.0001 then
             ans = mid
             hi = mid - 1
         else
@@ -397,38 +423,12 @@ local function findEventIndexAtTime(events, targetTime)
     return ans
 end
 
-local function restoreHeldNotesAtTime(events, nextIndex)
-    local active = {}
-    for i = 1, nextIndex - 1 do
-        local ev = events[i]
-        if ev.kind == "press" and ev.noteId then
-            active[ev.noteId] = {event = ev, index = i}
-        elseif ev.kind == "release" and ev.noteId then
-            active[ev.noteId] = nil
+local function restoreHeldNotesAtIndex(events, nextIndex, seekIndex)
+    for _, entry in ipairs(Core.getHeldNotesAtIndex(events, nextIndex, seekIndex)) do
+        local event = entry.event
+        for _, char in ipairs(event.chars) do
+            pressChar(char, event.velocity, event.noteId)
         end
-    end
-    local latestByKey = {}
-    for noteId, entry in pairs(active) do
-        for _, char in ipairs(entry.event.chars) do
-            local info = CharToKeyInfo[char]
-            if info and info.keyEnum then
-                local previous = latestByKey[info.keyEnum]
-                if not previous or previous.index < entry.index then
-                    latestByKey[info.keyEnum] = {
-                        char = char, velocity = entry.event.velocity,
-                        noteId = noteId, index = entry.index,
-                    }
-                end
-            end
-        end
-    end
-    local selected = {}
-    for _, entry in pairs(latestByKey) do
-        table.insert(selected, entry)
-    end
-    table.sort(selected, function(a, b) return a.index < b.index end)
-    for _, entry in ipairs(selected) do
-        pressChar(entry.char, entry.velocity, entry.noteId)
     end
 end
 
@@ -458,6 +458,7 @@ local function runEventPlayer(events, myId, onStart, totalDuration, meta)
 
     local idx = 1
     local nEvents = #events
+    local seekIndex = Core.buildSeekIndex(events, 256)
     local lastClock = tick()
     local lastYieldClock = lastClock
 
@@ -470,7 +471,7 @@ local function runEventPlayer(events, myId, onStart, totalDuration, meta)
             releaseHeldKeys()
             PlayerHudState.currentTime = target
             idx = findEventIndexAtTime(events, target)
-            restoreHeldNotesAtTime(events, idx)
+            restoreHeldNotesAtIndex(events, idx, seekIndex)
             lastClock = tick()
             lastYieldClock = lastClock
         elseif PlayerHudState.paused then
@@ -478,7 +479,7 @@ local function runEventPlayer(events, myId, onStart, totalDuration, meta)
             task.wait(0.04)
             if playing and playbackId == myId and not PlayerHudState.paused
                 and PlayerHudState.seekTarget == nil then
-                restoreHeldNotesAtTime(events, idx)
+                restoreHeldNotesAtIndex(events, idx, seekIndex)
             end
             lastClock = tick()
             lastYieldClock = lastClock
@@ -562,6 +563,7 @@ end
 -- ==========================================
 -- MIDI parsing & playback
 -- ==========================================
+local recordHistory -- assigned with the playback-history state below
 local function parseAndPlayMidi(midiString, myId, onStart, meta, replayFn)
     if playbackId ~= myId then return false end
 
@@ -596,10 +598,7 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta, replayFn)
         if not queue or #queue == 0 then return end
         local noteId = table.remove(queue, 1)
         order = order + 1
-        table.insert(events, {
-            time = currentTime, order = order, kind = "release",
-            chars = {char}, noteId = noteId,
-        })
+        table.insert(events, {time = currentTime, order = order, kind = "release", chars = {char}, noteId = noteId})
     end
 
     local ok, err = pcall(Core.processMidi, stream, function(name, ...)
@@ -614,13 +613,12 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta, replayFn)
             currentTime = currentTime + ticks
         elseif name == "noteOn" then
             local channel, key, velocity = ...
-            -- Channel 10 (1-indexed) is General MIDI percussion; skip drum hits on piano
             if velocity == 0 then
                 addNoteOff(channel, key)
             elseif channel ~= 10 then
-                order = order + 1
                 local char = MidiToChar[key]
                 if char then
+                    order = order + 1
                     nextNoteId = nextNoteId + 1
                     local noteKey = channel * 128 + key
                     pendingNotes[noteKey] = pendingNotes[noteKey] or {}
@@ -653,12 +651,9 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta, replayFn)
 
     if playbackId ~= myId then return false end
 
-    table.sort(events, function(a, b)
-        if a.time == b.time then
-            return a.order < b.order
-        end
-        return a.time < b.time
-    end)
+    -- Preserve original MIDI order for events at the same tick, including
+    -- press-then-release pairs for zero-duration notes.
+    Core.sortMidiEvents(events)
 
     local isSmpte = bit32.btest(division, 0x8000)
     local smpteTicksPerSec = 0
@@ -679,26 +674,12 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta, replayFn)
     end
 
     -- Precompute real song timestamps (at 1.0x speed) for progress & seeking
-    local preTempo = 500000
-    local prevTick = 0
-    local songSec = 0
-    for _, ev in ipairs(events) do
-        local dt = ev.time - prevTick
-        if dt > 0 then
-            local spt = isSmpte and (1 / smpteTicksPerSec) or ((preTempo / 1000000) / division)
-            songSec = songSec + dt * spt
-            prevTick = ev.time
-        end
-        ev.songTime = songSec
-        -- A tempo event applies from its own tick onward: events at the same
-        -- tick already got their delta computed with the previous tempo.
-        if ev.type == "tempo" and ev.tempo > 0 then
-            preTempo = ev.tempo
-        end
-    end
-    local totalDuration = songSec
+    local totalDuration = Core.buildTimeline(events, division, isSmpte, smpteTicksPerSec)
 
     PlayerHudState.replayFn = replayFn
+    if #events > 0 and replayFn and recordHistory then
+        recordHistory(meta and meta.title, meta and meta.subtitle, replayFn)
+    end
     return runEventPlayer(events, myId, onStart, totalDuration, meta)
 end
 
@@ -708,85 +689,13 @@ end
 local function playTextSheet(sheet, bpm, myId, meta, replayFn)
     if playbackId ~= myId then return false end
 
-    local baseStep = 60 / math.max(tonumber(bpm) or 120, 1) / 2
-    local events = {}
-    local songSec = 0
-    local nextNoteId = 0
-    local i = 1
-    local len = #sheet
-
-    local function emitPress(chars)
-        nextNoteId = nextNoteId + 1
-        local noteId = nextNoteId
-        table.insert(events, {songTime = songSec, kind = "press", chars = chars, velocity = 0.7, noteId = noteId})
-        -- Synthetic release shortly after the press (text sheets have no
-        -- noteOff events; this gives a natural staccato feel).
-        local hold = math.min(baseStep * 0.7, 0.2)
-        table.insert(events, {songTime = songSec + hold, kind = "release", chars = chars, noteId = noteId})
-    end
-
-    while i <= len do
-        local ch = sheet:sub(i, i)
-        if ch == "[" then
-            local closeIdx = sheet:find("]", i + 1, true)
-            if closeIdx then
-                local group = sheet:sub(i + 1, closeIdx - 1)
-                if group:find(" ") then
-                    -- Arpeggio: each character is played in sequence.
-                    for j = 1, #group do
-                        local gc = group:sub(j, j)
-                        if CharToKeyInfo[gc] then
-                            nextNoteId = nextNoteId + 1
-                            local noteId = nextNoteId
-                            table.insert(events, {songTime = songSec, kind = "press", chars = {gc}, velocity = 0.7, noteId = noteId})
-                            local hold = math.min(baseStep * 0.35, 0.06)
-                            table.insert(events, {songTime = songSec + hold, kind = "release", chars = {gc}, noteId = noteId})
-                            songSec = songSec + hold
-                        end
-                    end
-                    songSec = songSec + baseStep * 0.5
-                else
-                    -- Chord: all characters are pressed simultaneously.
-                    local chord = {}
-                    for j = 1, #group do
-                        local gc = group:sub(j, j)
-                        if CharToKeyInfo[gc] then
-                            table.insert(chord, gc)
-                        end
-                    end
-                    if #chord > 0 then
-                        emitPress(chord)
-                    end
-                    songSec = songSec + baseStep
-                end
-                i = closeIdx + 1
-            else
-                i = i + 1
-            end
-        elseif ch == " " or ch == "-" or ch == "|" or ch == "\n" then
-            songSec = songSec + baseStep
-            i = i + 1
-        elseif CharToKeyInfo[ch] then
-            emitPress({ch})
-            songSec = songSec + baseStep
-            i = i + 1
-        else
-            i = i + 1
-        end
-    end
-
-    table.sort(events, function(a, b)
-        if a.songTime == b.songTime then
-            if a.kind ~= b.kind then
-                return a.kind == "release"
-            end
-            return false
-        end
-        return a.songTime < b.songTime
+    local events, totalDuration = Core.buildTextSheetEvents(sheet, bpm, function(c)
+        return CharToKeyInfo[c] ~= nil
     end)
-
-    local totalDuration = songSec
     PlayerHudState.replayFn = replayFn
+    if #events > 0 and replayFn and recordHistory then
+        recordHistory(meta and meta.title, meta and meta.subtitle, replayFn)
+    end
     return runEventPlayer(events, myId, nil, totalDuration, meta)
 end
 
@@ -1031,7 +940,7 @@ local HistoryState = {
     suppressCallback = false,
 }
 
-local function recordHistory(title, source, replayFn)
+recordHistory = function(title, source, replayFn)
     table.insert(HistoryState.entries, 1, {
         title = tostring(title or "Unknown"),
         source = tostring(source or "Unknown"),
@@ -1521,7 +1430,6 @@ local function downloadAndPlayUrl(rawUrl, sourceName, silent, displayTitle)
         local replayFn = function()
             downloadAndPlayUrl(url, sourceName, silent, displayTitle)
         end
-        recordHistory(title, sourceName, replayFn)
         local played = parseAndPlayMidi(midiBody, myId, nil, {title = title, subtitle = sourceName or "URL"}, replayFn)
         if not played and playbackId == myId and not silent then
             notify("Invalid MIDI", "Downloaded file could not be parsed as MIDI.", 4)
@@ -1533,7 +1441,7 @@ end
 -- Obsidian window & tabs
 -- ==========================================
 local Window = Library:CreateWindow({
-    Title = "🎹 Universal Piano",
+    Title = "🎹 Universal Piano v" .. SCRIPT_VERSION,
     Footer = "MIDI · Local · Sheets · NanoMIDI · MuseScore · MidiShow",
     ToggleKeybind = Enum.KeyCode.Quote,
     ShowCustomCursor = true,
@@ -1888,7 +1796,9 @@ RepoBox:AddButton({
 
         notify("Verifying Links...", string.format("Testing %d links. Click the button again to cancel.", total), 3)
 
-        for _ = 1, 6 do
+        -- Keep the request rate modest (at most two in flight) and leave a
+        -- short gap between requests to reduce repository/API rate limiting.
+        for _ = 1, 2 do
             task.spawn(function()
                 while true do
                     if QuickState.verifyAbort then break end
@@ -1901,6 +1811,14 @@ RepoBox:AddButton({
                     local status = ok and res and (res.StatusCode or res.status_code) or nil
                     local body = getResponseBody(res)
                     local isMidi = ok and res and status == 200 and body ~= nil and body:find("MThd", 1, true) ~= nil
+
+                    -- Respect explicit rate-limit / access-denied responses
+                    -- before the worker takes another URL from the queue.
+                    if status == 429 or status == 403 then
+                        task.wait(2)
+                    else
+                        task.wait(0.25)
+                    end
 
                     if isMidi then
                         passed = passed + 1
@@ -2104,7 +2022,8 @@ PlaybackBox:AddButton({
 -- Velocity, Layout & Articulation (items 1, 2, 5, 6)
 -- ==========================================
 PlaybackBox:AddSlider("VelocityMin", {
-    Text = "Velocity Output Min",
+    Text = "Fallback Hold Min",
+    Tooltip = "The virtual keyboard can't send velocity, so the velocity sliders control how long a note rings if the file has no note-off (fallback hold).",
     Default = velocityMin,
     Min = 0,
     Max = 1,
@@ -2115,7 +2034,8 @@ PlaybackBox:AddSlider("VelocityMin", {
 })
 
 PlaybackBox:AddSlider("VelocityMax", {
-    Text = "Velocity Output Max",
+    Text = "Fallback Hold Max",
+    Tooltip = "The virtual keyboard can't send velocity, so the velocity sliders control how long a note rings if the file has no note-off (fallback hold).",
     Default = velocityMax,
     Min = 0,
     Max = 1,
@@ -2126,7 +2046,8 @@ PlaybackBox:AddSlider("VelocityMax", {
 })
 
 PlaybackBox:AddSlider("VelocityCurve", {
-    Text = "Velocity Curve (1=linear)",
+    Text = "Fallback Hold Curve (1=linear)",
+    Tooltip = "Curves how note velocity maps to fallback hold length (1 = linear).",
     Default = 1,
     Min = 0.5,
     Max = 3,
@@ -2159,7 +2080,7 @@ PlaybackBox:AddToggle("HighlightNextToggle", {
 
 PlaybackBox:AddDropdown("LayoutSelect", {
     Text = "Keyboard Layout",
-    Values = { "Full (60 keys)", "Compact (12 keys)" },
+    Values = { "Full (61 keys)", "Compact (12 keys)" },
     Default = 1,
     Multi = false,
     Callback = function(Option)
@@ -2170,6 +2091,22 @@ PlaybackBox:AddDropdown("LayoutSelect", {
             currentLayoutName = layoutName
             buildLayout(layoutName)
             notify("Layout Changed", "Keyboard layout: " .. choice, 2)
+        end
+    end,
+})
+
+PlaybackBox:AddSlider("CompactStartNote", {
+    Text = "Compact Start Note",
+    Tooltip = "In compact mode, choose the first MIDI note mapped to the 12 keys (36–116).",
+    Default = compactStartNote,
+    Min = 36,
+    Max = 116,
+    Rounding = 0,
+    Callback = function(Value)
+        compactStartNote = math.floor(tonumber(Value) or 36)
+        if currentLayoutName == "compact" then
+            stopPlayback()
+            buildLayout("compact")
         end
     end,
 })
@@ -2464,7 +2401,7 @@ UploadBox:AddButton({
             local ok, result = pcall(InsertString)
             if ok and type(result) == "string" and result ~= "" then
                 uploadedMidi = result
-                UploadBox.UploadMidiInput:SetText(result)
+                UploadBox.UploadMidiInput:SetValue(result)
             end
         else
             notify("Upload", "InsertString not available in this executor. Paste base64 MIDI data instead.", 4)
@@ -2522,7 +2459,6 @@ UploadBox:AddButton({
         local replayFn = function()
             playUploadedMidi()
         end
-        recordHistory(title, "Upload", replayFn)
         task.spawn(function()
             local played = parseAndPlayMidi(midiData, myId, nil, {title = title, subtitle = "Upload"}, replayFn)
             if not played and playbackId == myId then
@@ -2569,11 +2505,15 @@ SheetBox:AddSlider("SheetBPM", {
 SheetBox:AddButton({
     Text = "▶️ Play Pasted Sheet",
     Func = function()
-        if pastedSheet == "" then return end
+        if pastedSheet == "" then
+            notify("Text Sheet", "Paste a sheet first.", 4)
+            return
+        end
         stopPlayback()
         local myId = playbackId
         local title = "Text Sheet (" .. tostring(sheetBpm) .. " BPM)"
-        local replayFn = function()
+        local replayFn
+        replayFn = function()
             stopPlayback()
             local newId = playbackId
             task.spawn(playTextSheet, pastedSheet, sheetBpm, newId, {
