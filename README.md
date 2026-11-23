@@ -9,23 +9,24 @@ unit-tested `core.lua` module.
 
 ## Features
 
-- **Virtual keyboard** — 60 keys (MIDI notes 36–95) mapped to your
+- **Virtual keyboard** — 61 keys (MIDI notes 36–96) mapped to your
   keyboard/mouse (`1!2@34$5%6^78*9(0` row plus `qQwWeErtTyYuiIoOpPa...`),
-  with MIDI note-on/note-off, velocity mapping, a velocity-scaled fallback
-  hold, legato mode, and voice stealing (16-voice ceiling) so fast passages
-  stay clean.
-- **Keyboard layouts** — toggle between the full 60-key layout and a compact
-  12-key octave layout.
+  with MIDI note-on/note-off, legato mode, and voice stealing (16-voice
+  ceiling) so fast passages stay clean. The virtual keyboard can't send
+  velocity, so the velocity sliders control the fallback hold length (how long
+  a note rings if a file has no note-off).
+- **Keyboard layouts** — toggle between the full 61-key layout and a compact
+  12-key layout. In compact mode, adjust the starting MIDI note (36–116) to
+  transpose its range.
 - **Quick Picks & URL** — browse the built-in `songs.json` list (172 songs),
   paste any `.mid` URL, or merge a custom `Name | URL` list as a third source.
   The dropdown is searchable.
-- **Playback History** — every played song is recorded (title + source) with
-  one-click replay; history is capped and stores only small replay closures,
-  never the MIDI payload.
+- **Playback History** — successfully parsed MIDI and text-sheet playbacks are
+  recorded (title + source) when a replay handler is available; history is capped
+  and stores only small replay closures, never the MIDI payload.
 - **Local & Sheets** — load MIDI files from your Roblox inventory, upload a
   `.mid` via the executor's `InsertString` (or paste base64), or paste
-  text-based sheet notation (chords `[ab]`, arpeggios `[a b c]`, one beat per
-  space/`-`/`|`/newline, tempo in BPM).
+  text-based sheet notation (see below).
 - **NanoMIDI API** — direct playback from NanoMIDI-style API endpoints.
 - **MuseScore & MidiShow** — paste a score/MIDI page URL and the script
   resolves the underlying MIDI file (reverse-engineered; see Caveats).
@@ -36,6 +37,29 @@ unit-tested `core.lua` module.
   song fetches.
 - **Single shared playback engine** — one event timeline drives the keyboard,
   HUD, and seek; tempo changes and SMPTE division are honored.
+
+## Song catalog provenance
+
+[`songs.json`](songs.json) is a list of external MIDI links, not MIDI files. At
+this revision, its 172 entries point to `thewildwestmidis/midis`,
+`KiyoEditz/Maestro`, `reality3d/3d-piano-player`, `callmeyyzx/midi`, and
+`MAraragi/MusicalScoreRecognition` on GitHub. The URLs identify the linked
+repositories; no license or redistribution permission is implied. Check the
+upstream repository and the individual file's terms before redistributing any
+linked MIDI.
+
+## Text-sheet notation
+
+Text sheets use characters from the selected keyboard layout. A single valid
+character plays one note; `[ab]` plays `a` and `b` together as a chord, while
+`[a b c]` plays those notes as a short arpeggio. Spaces, hyphens, pipes, and
+newlines each add one beat of rest. Other unmapped characters are ignored.
+The tempo field is in beats per minute; each ordinary note or separator
+advances half a beat. For example:
+
+```text
+[tu] y [ro] | a [sd]
+```
 
 ## Installation
 
@@ -62,16 +86,20 @@ unit-tested `core.lua` module.
 | `piano.lua` | Main script: UI, input, playback engine, network fetching. |
 | `core.lua` | Pure Lua 5.3 logic (MIDI parser, MD5, decoders, URL/HTML/search helpers). No Roblox dependencies — unit-testable. |
 | `songs.json` | Canonical quick-pick list (172 entries, `{"name", "url"}`). |
-| `tests/run_tests.lua` | Unit test suite for `core.lua`. |
-| `tests/run_tests.js` | Fengari (Lua 5.3 in JavaScript) harness so tests run without a Lua install. |
+| `tests/run_tests.lua` | Unit test suite for the Roblox-independent core helpers. |
+| `tests/run_tests.js` | Fengari harness; also syntax-checks `piano.lua` without executing Roblox-dependent code. |
+| `tests/validate_songs.js` | Validates `songs.json` shape, URL suffixes, and duplicates. |
 
 ## Testing
 
 `core.lua` is deliberately Roblox-free so it can be tested anywhere. The suite
-covers VLQ reading, MIDI event parsing (notes, tempo, running status,
-`0xF1`/`0xF7` stream integrity), MD5, custom-base64/hex decoding, HTML/URL
-helpers, search/filtering, quick-pick parsing, cookie merging, and duration
-formatting.
+covers MIDI parsing and edge cases (including F7 escaped events), timeline and
+text-sheet event generation, velocity mapping, event ordering, sparse seek-state
+restoration, active-note and voice cleanup, MD5/base64/hex helpers, HTML/URL
+handling, search/filtering, quick-pick parsing, cookie merging, and duration/
+artist formatting. The CI workflow also syntax-checks both Lua files on Lua 5.3/5.4,
+runs the native Lua 5.3 suite, checks `piano.lua` with fengari, and validates
+the song catalog.
 
 **With a Lua 5.3+ interpreter:**
 
@@ -83,7 +111,7 @@ lua tests/run_tests.lua
 
 ```sh
 cd tests
-npm install
+npm ci
 npm test
 ```
 

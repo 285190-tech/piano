@@ -5,7 +5,7 @@
 --   lua tests/run_tests.lua
 --
 -- Or without a Lua install (uses fengari, Lua 5.3 in JavaScript):
---   cd tests && npm install && node run_tests.js
+--   cd tests && npm ci && node run_tests.js
 
 local Core = CORE_MODULE
 if not Core then
@@ -183,9 +183,10 @@ do
     end
     check("0xF1 consumed its data byte (noteOn still parsed)", f1NoteOn)
 
-    -- In a Standard MIDI File, 0xF7 is followed by a VLQ length and data.
+    -- In a Standard MIDI File, 0xF7 is followed by a VLQ length and payload.
+    local payload = string.char(0x43, 0x12, 0x00)
     local f7Track = table.concat({
-        vlq(0) .. string.char(0xF7) .. vlq(3) .. string.char(0x43, 0x12, 0x00),
+        vlq(0) .. string.char(0xF7) .. vlq(#payload) .. payload,
         vlq(1) .. string.char(0x90, 0x40, 0x7F),
         vlq(0) .. metaEvent(0x2F, ""),
     })
@@ -195,15 +196,13 @@ do
     end)
     check("0xF7 parse does not error", okF7)
     local f7NoteOn = false
-    for _, ev in ipairs(gotF7) do
-        if ev.name == "noteOn" and ev.args[2] == 64 then f7NoteOn = true end
-    end
-    check("0xF7 consumed length and data (noteOn still parsed)", f7NoteOn)
     local f7Data
     for _, ev in ipairs(gotF7) do
+        if ev.name == "noteOn" and ev.args[2] == 64 then f7NoteOn = true end
         if ev.name == "eox" then f7Data = ev.args[1] end
     end
-    eq("0xF7 payload", f7Data, string.char(0x43, 0x12, 0x00))
+    check("0xF7 consumed length and payload (noteOn still parsed)", f7NoteOn)
+    eq("0xF7 payload", f7Data, payload)
 end
 
 -- ==========================================
@@ -262,6 +261,9 @@ do
     if allOk then
         check("base64 round-trip (all samples)", true)
     end
+    local alphabetWithCustomPad = alphabet .. "."
+    eq("65-char alphabet custom padding", Core.decodeCustomBase64("GG..", alphabetWithCustomPad), "A")
+    eq("custom base64 rejects short alphabet", Core.decodeCustomBase64("QQ==", alphabet:sub(1, 63)), "")
 end
 
 -- Standard base64 decoding
@@ -318,6 +320,8 @@ do
     eq("encodeUrlPath", Core.encodeUrlPath("a b/c d.mid"), "a%20b/c%20d.mid")
     eq("encodeQueryParam", Core.encodeQueryParam("unravel op"), "unravel%20op")
     eq("deriveTitleFromUrl", Core.deriveTitleFromUrl("https://x.com/dir/My%20Song.mid"), "My Song")
+    eq("deriveTitleFromUrl ignores query", Core.deriveTitleFromUrl("https://x.com/dir/song.mid?token=abc"), "song")
+    eq("deriveTitleFromUrl ignores fragment", Core.deriveTitleFromUrl("https://x.com/dir/song.mid#section"), "song")
 end
 
 -- ==========================================
@@ -405,6 +409,293 @@ do
 end
 
 -- ==========================================
+-- buildTimeline
+-- ==========================================
+print("buildTimeline")
+do
+    local function approx(a, b) return math.abs(a - b) < 1e-9 end
+
+    -- Constant tempo: 500000 us/quarter, 96 ticks/quarter => 0.5s per quarter.
+    local events = {
+        {time = 0, kind = "press"},
+        {time = 96, kind = "press"},
+        {time = 192, kind = "press"},
+    }
+    local total = Core.buildTimeline(events, 96, false, 0)
+    check("timeline constant tempo total", approx(total, 1.0), total)
+    check("timeline ev0 songTime", approx(events[1].songTime, 0), events[1].songTime)
+    check("timeline ev1 songTime", approx(events[2].songTime, 0.5), events[2].songTime)
+    check("timeline ev2 songTime", approx(events[3].songTime, 1.0), events[3].songTime)
+
+    -- Tempo change at tick 96 halves the tempo (250000 us/quarter).
+    local events2 = {
+        {time = 0, kind = "press"},
+        {time = 96, type = "tempo", tempo = 250000},
+        {time = 192, kind = "press"},
+    }
+    local total2 = Core.buildTimeline(events2, 96, false, 0)
+    check("timeline tempo change total", approx(total2, 0.75), total2)
+    check("timeline tempo change ev2 songTime", approx(events2[3].songTime, 0.75), events2[3].songTime)
+
+    -- SMPTE: 100 ticks/sec, event at tick 100 => 1.0s.
+    local events3 = {
+        {time = 0, kind = "press"},
+        {time = 100, kind = "press"},
+    }
+    local total3 = Core.buildTimeline(events3, 0, true, 100)
+    check("timeline smpte total", approx(total3, 1.0), total3)
+    check("timeline smpte ev1 songTime", approx(events3[2].songTime, 1.0), events3[2].songTime)
+end
+
+-- ==========================================
+-- buildTextSheetEvents
+-- ==========================================
+print("buildTextSheetEvents")
+do
+    local function approx(a, b) return math.abs(a - b) < 1e-9 end
+    local function valid(c) return c == "a" or c == "b" end
+
+    -- Single note at 120 BPM: baseStep = 60/120/2 = 0.25.
+    local ev, total = Core.buildTextSheetEvents("a", 120, valid)
+    check("sheet single total", approx(total, 0.25), total)
+    eq("sheet single event count", #ev, 2)
+    eq("sheet single first kind", ev[1].kind, "press")
+    check("sheet single first songTime", approx(ev[1].songTime, 0), ev[1].songTime)
+    eq("sheet single second kind", ev[2].kind, "release")
+    eq("sheet press/release note id", ev[2].noteId, ev[1].noteId)
+
+    -- Chord: both chars pressed together.
+    local evc = Core.buildTextSheetEvents("[ab]", 120, valid)
+    eq("sheet chord press chars", #evc[1].chars, 2)
+
+    -- Arpeggio: notes are sequential, not simultaneous.
+    local eva = Core.buildTextSheetEvents("[a b]", 120, valid)
+    eq("sheet arpeggio event count", #eva, 4)
+    check("sheet arpeggio sequential", eva[1].songTime == 0 and eva[3].songTime > eva[1].songTime)
+
+    -- Separator advances one beat.
+    local _, totals = Core.buildTextSheetEvents("a a", 120, valid)
+    check("sheet separator total", approx(totals, 0.75), totals)
+
+    -- Invalid characters are skipped.
+    local evi = Core.buildTextSheetEvents("a!", 120, valid)
+    eq("sheet invalid skipped count", #evi, 2)
+end
+
+-- ==========================================
+-- mapVelocity
+-- ==========================================
+print("mapVelocity")
+do
+    local function approx(a, b) return math.abs(a - b) < 1e-9 end
+    check("velocity linear mid", approx(Core.mapVelocity(0.5, 0.2, 1.0, 1), 0.6))
+    check("velocity linear min", approx(Core.mapVelocity(0, 0.2, 1.0, 1), 0.2))
+    check("velocity linear max", approx(Core.mapVelocity(1, 0.2, 1.0, 1), 1.0))
+    check("velocity nil defaults to 0.5", approx(Core.mapVelocity(nil, 0.2, 1.0, 1), 0.6))
+    check("velocity clamps high", approx(Core.mapVelocity(2, 0.2, 1.0, 1), 1.0))
+    check("velocity clamps low", approx(Core.mapVelocity(-1, 0.2, 1.0, 1), 0.2))
+    check("velocity curve squares", approx(Core.mapVelocity(0.5, 0, 1, 2), 0.25))
+end
+
+-- ==========================================
+-- sortMidiEvents
+-- ==========================================
+print("sortMidiEvents")
+do
+    local events = {
+        {time = 12, order = 1, kind = "press", id = "later"},
+        {time = 5, order = 3, kind = "press", id = "press3"},
+        {time = 5, order = 2, kind = "release", id = "release2"},
+        {time = 5, order = 1, kind = "press", id = "press1"},
+        {time = 5, order = 4, kind = "release", id = "release4"},
+    }
+    local sorted = Core.sortMidiEvents(events)
+    eq("sort returns input list", sorted, events)
+    eq("sort by time and original order", sorted[1].id, "press1")
+    eq("mixed event order preserved", sorted[2].id, "release2")
+    eq("next press order preserved", sorted[3].id, "press3")
+    eq("next release order preserved", sorted[4].id, "release4")
+    eq("later tick last", sorted[5].id, "later")
+end
+
+-- ==========================================
+-- seek index / held-note restoration
+-- ==========================================
+print("seek index")
+do
+    local events = {
+        {kind = "press", noteId = 10, chars = {"a"}, velocity = 0.4},
+        {kind = "press", noteId = 11, chars = {"b"}, velocity = 0.8},
+        {kind = "release", noteId = 10, chars = {"a"}},
+        {kind = "release", noteId = 11, chars = {"b"}},
+    }
+    local index = Core.buildSeekIndex(events, 2)
+    local held = Core.getHeldNotesAtIndex(events, 3, index)
+    eq("seek active press count before releases", #held, 2)
+    eq("seek active first note id", held[1].event.noteId, 10)
+    eq("seek active second note id", held[2].event.noteId, 11)
+    local afterOneRelease = Core.getHeldNotesAtIndex(events, 4, index)
+    eq("seek removes released note", #afterOneRelease, 1)
+    eq("seek retains still-held note", afterOneRelease[1].event.noteId, 11)
+    eq("seek after all releases", #Core.getHeldNotesAtIndex(events, 5, index), 0)
+    check("seek index uses sparse checkpoints", #index.checkpoints < #events + 1)
+
+    local many = {{kind = "press", noteId = 10000, chars = {"z"}}}
+    for i = 1, 700 do
+        many[#many + 1] = {kind = "press", noteId = i, chars = {"x"}}
+        many[#many + 1] = {kind = "release", noteId = i, chars = {"x"}}
+    end
+    local largeIndex = Core.buildSeekIndex(many, 64)
+    local largeHeld = Core.getHeldNotesAtIndex(many, #many + 1, largeIndex)
+    eq("large seek restores long-held note", #largeHeld, 1)
+    eq("large seek restored note identity", largeHeld[1].event.noteId, 10000)
+    check("large seek checkpoint count", #largeIndex.checkpoints > 1)
+
+    -- Same-tick events must honor source order: a zero-duration note's release
+    -- follows its press instead of being sorted ahead and lost.
+    local zeroDuration = {
+        {time = 4, order = 1, kind = "press", noteId = 501, chars = {"q"}},
+        {time = 4, order = 2, kind = "release", noteId = 501, chars = {"q"}},
+    }
+    Core.sortMidiEvents(zeroDuration)
+    eq("same-tick zero-duration press first", zeroDuration[1].kind, "press")
+    eq("same-tick zero-duration release second", zeroDuration[2].kind, "release")
+    local zeroIndex = Core.buildSeekIndex(zeroDuration, 1)
+    eq("zero-duration note held after press", #Core.getHeldNotesAtIndex(zeroDuration, 2, zeroIndex), 1)
+    eq("zero-duration note released after note-off", #Core.getHeldNotesAtIndex(zeroDuration, 3, zeroIndex), 0)
+end
+
+-- ==========================================
+-- active-note and voice cleanup
+-- ==========================================
+print("active-note cleanup")
+do
+    local tokens = {a = true, b = true}
+    local removed, remaining = Core.releaseActiveNoteToken(tokens, "a")
+    check("release active token", removed)
+    eq("active tokens remaining", remaining, 1)
+    local removedAgain, stillRemaining = Core.releaseActiveNoteToken(tokens, "a")
+    check("duplicate release is ignored", not removedAgain)
+    eq("duplicate release preserves other token", stillRemaining, 1)
+    local voices = {
+        {keyEnum = "Q", noteToken = "a"},
+        {keyEnum = "Q", noteToken = "b"},
+        {keyEnum = "W", noteToken = "c"},
+    }
+    eq("remove timed-out voice entry", Core.removeVoiceEntries(voices, "Q", "a"), 1)
+    eq("voice count after exact removal", #voices, 2)
+    eq("remove all voices for stolen key", Core.removeVoiceEntries(voices, "Q"), 1)
+    eq("unrelated voice retained", #voices, 1)
+    eq("unrelated key retained", voices[1].keyEnum, "W")
+end
+
+-- ==========================================
+-- readVLQ boundaries
+-- ==========================================
+print("readVLQ boundaries")
+do
+    local function v(bytes) return Core.readVLQ(Core.createStringStream(bytes)) end
+    eq("VLQ max 4-byte value", v(string.char(0xFF, 0xFF, 0xFF, 0x7F)), 268435455)
+    eq("VLQ 4-byte zero value", v(string.char(0x80, 0x80, 0x80, 0x00)), 0)
+end
+
+-- ==========================================
+-- formatArtists
+-- ==========================================
+print("formatArtists")
+do
+    eq("formatArtists nil", Core.formatArtists(nil), "Unknown")
+    eq("formatArtists table", Core.formatArtists({"A", "B"}), "A, B")
+    eq("formatArtists string", Core.formatArtists("Solo"), "Solo")
+    eq("formatArtists number", Core.formatArtists(42), "42")
+end
+
+-- ==========================================
+-- mergeCookieStrings
+-- ==========================================
+print("mergeCookieStrings")
+do
+    eq("merge basic", Core.mergeCookieStrings("a=1; b=2", "c=3; Path=/"), "a=1; b=2; c=3")
+    eq("merge overwrite", Core.mergeCookieStrings("a=1", "a=9"), "a=9")
+    eq("merge expires with comma", Core.mergeCookieStrings("", "x=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Path=/"), "x=1")
+    eq("merge empty", Core.mergeCookieStrings("", ""), "")
+end
+
+-- ==========================================
+-- processMidi edge cases
+-- ==========================================
+print("processMidi edge cases")
+do
+    -- Unknown chunk is skipped; surrounding chunks still parse.
+    local track = vlq(0) .. string.char(0x90, 0x40, 0x7F) .. vlq(0) .. metaEvent(0x2F, "")
+    local midi = chunk("MThd", string.pack(">I2I2I2", 0, 1, 96))
+        .. chunk("XFIH", "junkdata")
+        .. chunk("MTrk", track)
+    local names = {}
+    Core.processMidi(Core.createStringStream(midi), function(name) table.insert(names, name) end)
+    eq("unknown chunk: first event", names[1], "header")
+    eq("unknown chunk: then track", names[2], "track")
+
+    -- Truncated MTrk (declared length exceeds available data) errors.
+    local trunc = chunk("MThd", string.pack(">I2I2I2", 0, 1, 96))
+        .. "MTrk" .. string.pack(">I4", 100) .. vlq(0) .. string.char(0x90, 0x40)
+    local okTrunc = pcall(Core.processMidi, Core.createStringStream(trunc), function() end)
+    check("truncated MTrk errors", okTrunc == false)
+
+    -- Format-1 multi-track: header reports 2 tracks, both chunks parse.
+    local t1 = vlq(0) .. metaEvent(0x03, "Track1") .. vlq(0) .. metaEvent(0x2F, "")
+    local t2 = vlq(0) .. string.char(0x90, 0x3C, 0x7F) .. vlq(0) .. metaEvent(0x2F, "")
+    local midiFmt1 = chunk("MThd", string.pack(">I2I2I2", 1, 2, 96)) .. chunk("MTrk", t1) .. chunk("MTrk", t2)
+    local trackCount = 0
+    local fmt1Tracks = Core.processMidi(Core.createStringStream(midiFmt1), function(name)
+        if name == "track" then trackCount = trackCount + 1 end
+    end)
+    eq("format-1 header track count", fmt1Tracks, 2)
+    eq("format-1 parsed track chunks", trackCount, 2)
+
+    -- Controller, pitch, timeSignature, keySignature, sysex events.
+    local evTrack = table.concat({
+        vlq(0) .. string.char(0xB0, 7, 100),
+        vlq(0) .. string.char(0xE0, 0x00, 0x40),
+        vlq(0) .. metaEvent(0x58, string.char(4, 2, 24, 8)),
+        vlq(0) .. metaEvent(0x59, string.char(1, 0)),
+        vlq(0) .. string.char(0xF0) .. vlq(3) .. "abc",
+        vlq(0) .. metaEvent(0x2F, ""),
+    })
+    local got = {}
+    Core.processMidi(Core.createStringStream(buildMidi(evTrack)), function(name, ...)
+        table.insert(got, {name = name, args = {...}})
+    end)
+    local function find(n)
+        for _, e in ipairs(got) do if e.name == n then return e end end
+    end
+    local ctrl = find("controller")
+    check("controller event present", ctrl ~= nil)
+    if ctrl then
+        eq("controller number", ctrl.args[2], 7)
+        eq("controller value", ctrl.args[3], 100)
+    end
+    local pitch = find("pitch")
+    check("pitch event present", pitch ~= nil)
+    if pitch then check("pitch center is 0", math.abs(pitch.args[2]) < 1e-9, pitch.args[2]) end
+    local ts = find("timeSignature")
+    check("timeSignature event present", ts ~= nil)
+    if ts then
+        eq("timeSig numerator", ts.args[1], 4)
+        eq("timeSig denominator", ts.args[2], 4)
+    end
+    local ks = find("keySignature")
+    check("keySignature event present", ks ~= nil)
+    if ks then
+        eq("keySig count", ks.args[1], 1)
+        eq("keySig accidental", ks.args[2], "sharp")
+    end
+    local syx = find("sysexEvent")
+    check("sysex event present", syx ~= nil)
+    if syx then eq("sysex data", syx.args[1], "abc") end
+end
+
+-- ==========================================
 -- Module integrity
 -- ==========================================
 print("core.lua exports")
@@ -417,6 +708,9 @@ do
         "stripHtmlTags", "decodeHtmlEntities", "encodeUrlPath", "encodeQueryParam",
         "deriveTitleFromUrl", "formatArtists", "isMuseScoreUrl", "isMidiShowUrl",
         "normalizeMuseScoreInput", "normalizeMidiShowInput",
+        "buildTimeline", "buildTextSheetEvents", "mapVelocity", "sortMidiEvents",
+        "buildSeekIndex", "getHeldNotesAtIndex", "releaseActiveNoteToken",
+        "removeVoiceEntries",
     }
     local missing = {}
     for _, key in ipairs(expected) do

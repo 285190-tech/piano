@@ -15,9 +15,26 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install Lua interpreters
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.3 lua5.4
+
+      - name: Check Lua syntax (5.3 and 5.4)
+        run: |
+          luac5.3 -p core.lua piano.lua
+          luac5.4 -p core.lua piano.lua
+
+      - name: Run native Lua tests
+        run: lua5.3 tests/run_tests.lua
+
       - name: Install test dependencies
         working-directory: tests
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
+
+      - name: Validate songs.json
+        working-directory: tests
+        run: node validate_songs.js
 
       - name: Run unit tests (fengari)
         working-directory: tests

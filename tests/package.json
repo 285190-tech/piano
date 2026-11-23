@@ -2,7 +2,7 @@
   "name": "piano-tests",
   "version": "1.0.0",
   "private": true,
-  "description": "Unit tests for core.lua, runnable via fengari (Lua 5.3 in JavaScript)",
+  "description": "Core tests and piano.lua syntax checks via fengari (Lua 5.3 in JavaScript)",
   "scripts": {
     "test": "node run_tests.js"
   },
