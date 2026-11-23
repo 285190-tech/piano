@@ -218,11 +218,10 @@ local function processEvent(stream, callback, runningStatus)
             read(stream, 1)
             return 2, runningStatus
         elseif status == 0xF7 then
-            -- End of Exclusive: carries NO data bytes (per MIDI spec).
-            -- Treating it as a length-prefixed sysex (as some naive parsers
-            -- do) corrupts the stream for any file containing a bare EOX.
-            callback("eox", status)
-            return 1, runningStatus
+            local dataLen, vlqLen = readVLQ(stream)
+            local data = read(stream, dataLen)
+            callback("eox", data, status)
+            return 1 + vlqLen + dataLen, runningStatus
         elseif status == 0xFF then
             local metaType = read(stream, 1)
             return 1 + metaEvent(stream, callback, metaType), runningStatus
