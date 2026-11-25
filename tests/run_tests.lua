@@ -408,6 +408,20 @@ do
     check("isMidiShowUrl", Core.isMidiShowUrl("https://www.midishow.com/en/midi/1.html") == true)
 end
 
+print("MuseScore search parsing")
+do
+    local html = [[<a class="card" href='/user/178114/scores/520051?foo=1'><h2>It&#39;s Been So Long</h2></a>
+<a href="https://musescore.com/user/178114/scores/520051">duplicate</a>
+<a href="https://evil.example/user/1/scores/99">not a score</a>
+<script>{"url":"https:\/\/musescore.com\/user\/123\/scores\/42"}</script>]]
+    local results = Core.parseMuseScoreSearch(html)
+    eq("search result count and dedup", #results, 2)
+    eq("search title", results[1].title, "It's Been So Long")
+    eq("search canonical URL", results[1].url, "https://musescore.com/user/178114/scores/520051")
+    eq("search JSON fallback ID", results[2].id, "42")
+    eq("empty search", #Core.parseMuseScoreSearch("<html>No results</html>"), 0)
+end
+
 -- ==========================================
 -- buildTimeline
 -- ==========================================
@@ -550,6 +564,17 @@ do
     eq("large seek restores long-held note", #largeHeld, 1)
     eq("large seek restored note identity", largeHeld[1].event.noteId, 10000)
     check("large seek checkpoint count", #largeIndex.checkpoints > 1)
+    local hanging = {}
+    for i = 1, 2000 do hanging[i] = {kind="press", noteId=i, chars={"a"}, songTime=i} end
+    local boundedIndex = Core.buildSeekIndex(hanging, 1)
+    local snapshotEntries = 0
+    for _, checkpoint in ipairs(boundedIndex.checkpoints) do
+        for _ in pairs(checkpoint.active) do snapshotEntries = snapshotEntries + 1 end
+    end
+    check("seek snapshots respect memory budget", snapshotEntries <= 16384 and #boundedIndex.checkpoints <= 512)
+    local allHeld = Core.getHeldNotesAtIndex(hanging, #hanging + 1, boundedIndex)
+    eq("budgeted seek preserves all active notes", #allHeld, 2000)
+    eq("budgeted seek preserves note ordering", allHeld[#allHeld].event.noteId, 2000)
 
     -- Same-tick events must honor source order: a zero-duration note's release
     -- follows its press instead of being sorted ahead and lost.
@@ -693,6 +718,228 @@ do
     local syx = find("sysexEvent")
     check("sysex event present", syx ~= nil)
     if syx then eq("sysex data", syx.args[1], "abc") end
+end
+
+
+print("MIDI cache and loop ranges")
+do
+    local cache = Core.newMidiCache(2, 6)
+    check("cache stores first", cache:put("a", "aa"))
+    check("cache stores second", cache:put("b", "bb"))
+    eq("cache read", cache:get("a"), "aa")
+    check("cache stores third", cache:put("c", "cc"))
+    eq("cache evicts least recently used", cache:get("b"), nil)
+    eq("cache keeps recently used", cache:get("a"), "aa")
+    check("cache rejects oversized", not cache:put("large", "1234567"))
+    check("cache replacement", cache:put("a", "1234"))
+    local count, bytes = cache:stats()
+    eq("cache entry count", count, 2)
+    eq("cache byte count", bytes, 6)
+    cache:clear()
+    count, bytes = cache:stats()
+    eq("cache clear count", count, 0)
+    eq("cache clear bytes", bytes, 0)
+    check("valid loop range", Core.isValidLoopRange(1, 2, 3))
+    check("reject reversed loop", not Core.isValidLoopRange(2, 1, 3))
+    check("reject tiny loop", not Core.isValidLoopRange(1, 1.01, 3))
+    check("reject outside loop", not Core.isValidLoopRange(1, 4, 3))
+    check("reject NaN loop", not Core.isValidLoopRange(0/0, 2, 3))
+end
+
+
+print("MIDI sustain")
+do
+    local events = {
+        {time=0, order=1, kind="sustain", channel=1, value=127},
+        {time=0, order=2, kind="press", channel=1, noteId=1, chars={"a"}},
+        {time=1, order=3, kind="release", channel=1, noteId=1, chars={"a"}},
+        {time=2, order=4, kind="release", channel=2, noteId=2, chars={"b"}},
+        {time=3, order=5, kind="sustain", channel=1, value=0},
+        {time=3, order=6, kind="press", channel=1, noteId=3, chars={"c"}},
+    }
+    local out = Core.applyMidiSustain(events)
+    eq("sustain keeps notes and removes controllers", #out, 4)
+    eq("sustain other channel unaffected", out[2].time, 2)
+    eq("sustain release deferred", out[3].time, 3)
+    eq("sustain release preserves identity", out[3].noteId, 1)
+    eq("sustain release before later same-tick note", out[4].noteId, 3)
+    eq("sustain does not mutate input", events[3].time, 1)
+    local unterminated = Core.applyMidiSustain({
+        {time=0, order=1, kind="sustain", channel=1, value=64},
+        {time=1, order=2, kind="release", channel=1, noteId=4},
+        {time=5, order=3, type="tempo", tempo=500000},
+    })
+    eq("unterminated pedal release at end", unterminated[#unterminated].time, 5)
+    eq("unterminated pedal keeps note id", unterminated[#unterminated].noteId, 4)
+end
+
+
+print("MIDI note folding and transpose")
+do
+    eq("note inside range", Core.mapMidiNote(60, 0, 36, 96, false), 60)
+    eq("transpose up", Core.mapMidiNote(60, 12, 36, 96, false), 72)
+    eq("out of range dropped", Core.mapMidiNote(24, 0, 36, 96, false), nil)
+    eq("fold low", Core.mapMidiNote(24, 0, 36, 96, true), 36)
+    eq("fold high", Core.mapMidiNote(108, 0, 36, 96, true), 96)
+    eq("transpose before fold", Core.mapMidiNote(96, 1, 36, 96, true), 85)
+    eq("compact unrepresentable pitch", Core.mapMidiNote(71, 0, 60, 65, true), nil)
+    eq("compact pitch class folding", Core.mapMidiNote(72, 0, 60, 71, true), 60)
+end
+
+
+print("MIDI to sheet export")
+do
+    local events = {
+        {kind="press", songTime=0, chars={"a"}},
+        {kind="press", songTime=0, chars={"b"}},
+        {kind="release", songTime=0.1, chars={"a"}},
+        {kind="press", songTime=0.5, chars={"c"}},
+    }
+    local sheet = Core.eventsToTextSheet(events, 120)
+    eq("sheet chord and timing", sheet, "[ab] c")
+    local roundtrip = Core.buildTextSheetEvents(sheet, 120, function() return true end)
+    eq("sheet roundtrip initial chord", table.concat(roundtrip[1].chars), "ab")
+    eq("sheet roundtrip later note time", roundtrip[3].songTime, 0.5)
+    check("sheet export rejects empty", Core.eventsToTextSheet({}, 120) == nil)
+    check("sheet export bounds memory", Core.eventsToTextSheet({{kind="press", songTime=100, chars={"a"}}}, 120, 4) == nil)
+    check("sheet export rejects invalid bpm", Core.eventsToTextSheet(events, 0) == nil)
+end
+
+
+print("MIDI tracks, filtering and humanization")
+do
+    local track1 = vlq(0) .. metaEvent(0x03, "Piano") .. vlq(0) .. metaEvent(0x04, "Grand")
+        .. vlq(0) .. string.char(0x90, 60, 100) .. vlq(48) .. string.char(0x80, 60, 0)
+        .. vlq(0) .. metaEvent(0x2F, "")
+    local track2 = vlq(0) .. metaEvent(0x03, "Drums")
+        .. vlq(0) .. string.char(0x99, 36, 100) .. vlq(48) .. string.char(0x89, 36, 0)
+        .. vlq(0) .. metaEvent(0x2F, "")
+    local midi = chunk("MThd", string.pack(">I2I2I2", 1, 2, 96)) .. chunk("MTrk", track1) .. chunk("MTrk", track2)
+    local events, tracks, duration = Core.decodeMidiTimeline(midi)
+    eq("track name", tracks[1].name, "Piano")
+    eq("instrument name", tracks[1].instrument, "Grand")
+    eq("second track name", tracks[2].name, "Drums")
+    check("track channel recorded", tracks[2].channels[10] == true)
+    eq("decoded duration", duration, 0.25)
+    check("decoded MIDI has notes", Core.hasMidiNotes(events))
+    check("empty timeline has no notes", not Core.hasMidiNotes({{kind="trackEnd"}}))
+    check("decode rejects empty data", not pcall(Core.decodeMidiTimeline, ""))
+    check("decode rejects truncated header", not pcall(Core.decodeMidiTimeline, "MThd"))
+    local missingTrack = chunk("MThd", string.pack(">I2I2I2", 1, 2, 96)) .. chunk("MTrk", track1)
+    check("decode rejects missing track", not pcall(Core.decodeMidiTimeline, missingTrack))
+    local badTrack = vlq(0) .. string.char(0x90, 60) -- velocity is missing
+    local spilling = chunk("MThd", string.pack(">I2I2I2", 1, 2, 96)) .. chunk("MTrk", badTrack) .. chunk("MTrk", track2)
+    check("decode rejects events spilling into next chunk", not pcall(Core.decodeMidiTimeline, spilling))
+    local badVlq = chunk("MThd", string.pack(">I2I2I2", 1, 2, 96)) .. chunk("MTrk", string.char(0x80)) .. chunk("MTrk", track2)
+    check("decode rejects delta spilling into next chunk", not pcall(Core.decodeMidiTimeline, badVlq))
+    local drum, note
+    for _, event in ipairs(events) do
+        if event.kind == "press" and event.channel == 10 then drum = event end
+        if event.kind == "press" and event.channel == 1 then note = event end
+    end
+    check("drums retained for optional mute", drum and drum.track == 2)
+    check("press matched to release", note and note.hasRelease)
+    local pedalTrack = vlq(0) .. string.char(0x90, 60, 100)
+        .. vlq(0) .. string.char(0xB0, 64, 127)
+        .. vlq(24) .. string.char(0x80, 60, 0)
+        .. vlq(24) .. string.char(0xB0, 64, 0)
+        .. vlq(0) .. metaEvent(0x2F, "")
+    local pedalEvents = Core.decodeMidiTimeline(buildMidi(pedalTrack))
+    local pedalRelease
+    for _, event in ipairs(pedalEvents) do if event.kind == "release" then pedalRelease = event end end
+    check("decoded CC64 extends release", pedalRelease and math.abs(pedalRelease.songTime - 0.25) < 0.000001)
+    local repeated = {}
+    for _ = 1, 500 do repeated[#repeated + 1] = vlq(0) .. string.char(0x90, 60, 100) end
+    for _ = 1, 500 do repeated[#repeated + 1] = vlq(0) .. string.char(0x80, 60, 0) end
+    repeated[#repeated + 1] = vlq(0) .. metaEvent(0x2F, "")
+    local repeatedEvents = Core.decodeMidiTimeline(buildMidi(table.concat(repeated)))
+    local releases = {}
+    for _, event in ipairs(repeatedEvents) do if event.kind == "release" then releases[#releases + 1] = event.noteId end end
+    eq("repeated note release count", #releases, 500)
+    eq("repeated notes release FIFO first", releases[1], 1)
+    eq("repeated notes release FIFO last", releases[500], 500)
+    check("channel mute", not Core.isMidiNoteEnabled(1, 10, {}, {[10] = true}, nil))
+    check("track mute", not Core.isMidiNoteEnabled(2, 1, {[2] = true}, {}, nil))
+    check("solo excludes other track", not Core.isMidiNoteEnabled(2, 1, {}, {}, 1))
+    check("solo includes selected track", Core.isMidiNoteEnabled(1, 1, {}, {}, 1))
+    local chord = {
+        {kind="press", noteId=1, songTime=1}, {kind="press", noteId=2, songTime=1},
+        {kind="release", noteId=1, songTime=2}, {kind="release", noteId=2, songTime=2},
+    }
+    local human, total = Core.humanizeMidiEvents(chord, 10, 20, function() return 1 end)
+    check("humanize first jitter", math.abs(human[1].songTime - 1.01) < 0.000001)
+    check("humanize chord roll", math.abs(human[2].songTime - 1.03) < 0.000001)
+    check("humanize shifts releases equally", math.abs(human[4].songTime - 2.03) < 0.000001)
+    check("humanize duration", math.abs(total - 2.03) < 0.000001)
+    eq("humanize leaves input untouched", chord[1].songTime, 1)
+    local noChange = Core.humanizeMidiEvents(chord, 0, 0, function() error("rng should not be called") end)
+    eq("humanize zero preserves time", noChange[1].songTime, 1)
+end
+
+
+print("Chat request parsing")
+do
+    local command, query = Core.parseSongRequest("  !PLAY  Fur Elise  ")
+    eq("command case insensitive", command, "play")
+    eq("request query trimmed", query, "Fur Elise")
+    eq("request command", Core.parseSongRequest("!request unravel"), "request")
+    check("other commands rejected", Core.parseSongRequest("!stop now") == nil)
+    check("empty request rejected", Core.parseSongRequest("!play   ") == nil)
+    check("URL requests rejected", Core.parseSongRequest("!play https://example.com/test") == nil)
+    check("long request rejected", Core.parseSongRequest("!play " .. string.rep("a", 101)) == nil)
+    local ids = Core.parseUserIdSet("123, 00456 invalid 78abc 0")
+    check("whitelist numeric ID", ids["123"] == true)
+    check("whitelist normalizes zeros", ids["456"] == true)
+    check("whitelist ignores invalid tokens", ids["78"] == nil and ids["0"] == nil)
+end
+
+
+print("Practice chords")
+do
+    local events = {
+        {songTime=1, kind="press", chars={"a", "b"}},
+        {songTime=1, kind="release", chars={"a"}},
+        {songTime=1, kind="press", chars={"b", "c"}},
+        {songTime=2, kind="press", chars={"d"}},
+    }
+    eq("practice groups same-time unique keys", table.concat(Core.practiceChord(events, 1)), "abc")
+    eq("practice ignores later notes", table.concat(Core.practiceChord(events, 4)), "d")
+    eq("practice rejects release start", #Core.practiceChord(events, 2), 0)
+    eq("practice empty index", #Core.practiceChord(events, 9), 0)
+end
+
+
+print("Upcoming note visualizer")
+do
+    local events = {
+        {songTime=1, kind="press", chars={"a", "b"}},
+        {songTime=2, kind="release", chars={"a"}},
+        {songTime=3, kind="press", chars={"c"}},
+        {songTime=5, kind="press", chars={"d"}},
+    }
+    local notes = Core.getUpcomingNotes(events, 1, 1, 2, 10)
+    eq("visualizer horizon excludes distant notes", #notes, 3)
+    eq("visualizer at target", notes[1].progress, 1)
+    eq("visualizer horizon edge", notes[3].progress, 0)
+    eq("visualizer limit", #Core.getUpcomingNotes(events, 1, 1, 2, 1), 1)
+    eq("visualizer start index", Core.getUpcomingNotes(events, 3, 1, 2, 10)[1].char, "c")
+    eq("visualizer invalid horizon", #Core.getUpcomingNotes(events, 1, 1, 0, 10), 0)
+end
+
+
+print("Persisted song lists")
+do
+    local entries = Core.sanitizeSongEntries({
+        {title="  Piano  ", url="https://example.com/song.mid"},
+        {title="Duplicate", url="https://example.com/song.mid"},
+        {title="Bad", url="file:///private"},
+        {title="Bad\nname", url="https://example.com/other.mid"},
+        {title="Second", url="http://example.com/second.mid"},
+    }, 10)
+    eq("song list filters invalid and duplicates", #entries, 2)
+    eq("song list trims title", entries[1].title, "Piano")
+    eq("song list enforces limit", #Core.sanitizeSongEntries(entries, 1), 1)
+    eq("song list handles bad input", #Core.sanitizeSongEntries("bad", 10), 0)
 end
 
 -- ==========================================
