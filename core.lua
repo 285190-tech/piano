@@ -248,6 +248,16 @@ local function readTrack(stream, callback, chunkLength, track)
     local chunkEnd = stream:seek("cur", 0) + chunkLength
     local runningStatus
     local ended = false
+    -- MIDI events must not consume bytes belonging to the next chunk. This
+    -- wrapper is bounded without copying the entire track into memory.
+    local trackStream = {
+        read = function(_, count)
+            if count > chunkEnd - stream:seek("cur", 0) then
+                error("MIDI event exceeds track chunk")
+            end
+            return stream:read(count)
+        end,
+    }
 
     local function trackCallback(name, ...)
         if name == "endOfTrack" then
@@ -257,12 +267,13 @@ local function readTrack(stream, callback, chunkLength, track)
     end
 
     while not ended and stream:seek("cur", 0) < chunkEnd do
-        local ticks = readVLQ(stream)
+        local ticks = readVLQ(trackStream)
         if ticks > 0 then trackCallback("deltatime", ticks) end
-        local _, nextRunningStatus = processEvent(stream, trackCallback, runningStatus)
+        local _, nextRunningStatus = processEvent(trackStream, trackCallback, runningStatus)
         runningStatus = nextRunningStatus
     end
-    stream:seek("set", chunkEnd)
+    local remaining = chunkEnd - stream:seek("cur", 0)
+    if remaining > 0 then read(trackStream, remaining) end
 end
 
 local function processMidi(stream, callback)
@@ -399,6 +410,50 @@ local function stripHtmlTags(str)
     return decodeHtmlEntities(tostring(str or ""):gsub("<[^>]->", " ")):gsub("%s+", " "):match("^%s*(.-)%s*$")
 end
 Core.stripHtmlTags = stripHtmlTags
+
+
+-- Parse public score links, including cards whose title is nested in a heading
+-- and links embedded in JSON/escaped HTML. Never turn external links into a
+-- trusted MuseScore URL merely because their path contains /scores/.
+local function parseMuseScoreSearch(html)
+    local text = decodeHtmlEntities(tostring(html or "")):gsub("\\/", "/")
+    local results, seen = {}, {}
+    local function add(url, title)
+        url = tostring(url or ""):gsub("#.*$", ""):gsub("%?.*$", "")
+        if url:sub(1, 1) == "/" and url:sub(1, 2) ~= "//" then
+            url = "https://musescore.com" .. url
+        end
+        if not url:match("^https?://musescore%.com/") and not url:match("^https?://www%.musescore%.com/") then return end
+        local id = url:match("/scores/(%d+)")
+        if not id or seen[id] then return end
+        title = stripHtmlTags(title or "")
+        if title == "" then title = "Score #" .. id end
+        if #title > 90 then title = title:sub(1, 87) .. "..." end
+        seen[id] = true
+        results[#results + 1] = {title = title, url = url, id = id}
+    end
+    -- Read anchor attributes independently of their order and quote style.
+    for attrs, inner in text:gmatch("<a%s+([^>]-)>(.-)</a%s*>") do
+        local url = attrs:match('href%s*=%s*"([^"]+)"') or attrs:match("href%s*=%s*'([^']+)'")
+        local title = inner:match("<h[1-6][^>]*>(.-)</h[1-6]%s*>")
+            or attrs:match('aria%-label%s*=%s*"([^"]+)"')
+            or attrs:match('title%s*=%s*"([^"]+)"')
+            or inner:match('alt%s*=%s*"([^"]+)"') or inner
+        add(url, title)
+        if #results >= 50 then return results end
+    end
+    -- Recover usable links even if the page embeds cards as serialized JSON.
+    for url in text:gmatch('"([^"%s]*musescore%.com/[^"%s]*/scores/%d+[^"%s]*)"') do
+        add(url, nil)
+        if #results >= 50 then return results end
+    end
+    for url in text:gmatch('"(/[^"%s]*/scores/%d+[^"%s]*)"') do
+        add(url, nil)
+        if #results >= 50 then return results end
+    end
+    return results
+end
+Core.parseMuseScoreSearch = parseMuseScoreSearch
 
 -- ==========================================
 -- MD5 (pure Lua implementation)
@@ -914,25 +969,32 @@ end
 Core.sortMidiEvents = sortMidiEvents
 
 -- Build sparse snapshots of active note presses for efficient seek restore.
--- Snapshots represent state immediately before `nextIndex`; seeking starts at
--- the nearest prior checkpoint and replays only a bounded event suffix.
+-- Snapshots represent state immediately before `nextIndex`. Bound their
+-- memory even for malformed files containing thousands of never-released
+-- notes. When the budget is exhausted, seeking scans a longer suffix instead
+-- of losing note state or allocating an unbounded number of copies.
 local function buildSeekIndex(events, checkpointInterval)
     checkpointInterval = math.max(1, math.floor(tonumber(checkpointInterval) or 256))
-    local active = {}
+    local active, activeCount, storedEntries = {}, 0, 0
     local checkpoints = {{nextIndex = 1, active = {}}}
+    local maxCheckpoints, maxSnapshotEntries = 512, 16384
     for i, ev in ipairs(events) do
         if ev.noteId ~= nil then
             if ev.kind == "press" then
+                if active[ev.noteId] == nil then activeCount = activeCount + 1 end
                 active[ev.noteId] = {event = ev, index = i}
-            elseif ev.kind == "release" then
+            elseif ev.kind == "release" and active[ev.noteId] ~= nil then
                 active[ev.noteId] = nil
+                activeCount = activeCount - 1
             end
         end
-        if i % checkpointInterval == 0 then
+        if i % checkpointInterval == 0 and #checkpoints < maxCheckpoints
+            and storedEntries + activeCount <= maxSnapshotEntries then
             local snapshot = {}
             for noteId, entry in pairs(active) do
                 snapshot[noteId] = entry
             end
+            storedEntries = storedEntries + activeCount
             checkpoints[#checkpoints + 1] = {nextIndex = i + 1, active = snapshot}
         end
     end
@@ -1002,5 +1064,366 @@ local function removeVoiceEntries(voices, keyEnum, noteToken)
     return removed
 end
 Core.removeVoiceEntries = removeVoiceEntries
+
+-- Bounded in-memory LRU; intended only for public MIDI bodies. No I/O.
+function Core.newMidiCache(maxEntries, maxBytes)
+    maxEntries = math.max(0, math.floor(tonumber(maxEntries) or 16))
+    maxBytes = math.max(0, math.floor(tonumber(maxBytes) or 8 * 1024 * 1024))
+    local entries, order, bytes = {}, {}, 0
+    local cache = {}
+    local function remove(key)
+        local value = entries[key]
+        if value then bytes = bytes - #value; entries[key] = nil end
+        for i = #order, 1, -1 do
+            if order[i] == key then table.remove(order, i) end
+        end
+    end
+    function cache:get(key)
+        local value = entries[key]
+        if value then
+            remove(key)
+            entries[key] = value
+            bytes = bytes + #value
+            order[#order + 1] = key
+        end
+        return value
+    end
+    function cache:put(key, value)
+        if type(key) ~= "string" or key == "" or type(value) ~= "string" then return false end
+        remove(key)
+        if #value > maxBytes or maxEntries == 0 then return false end
+        while #order >= maxEntries or bytes + #value > maxBytes do remove(order[1]) end
+        entries[key] = value
+        bytes = bytes + #value
+        order[#order + 1] = key
+        return true
+    end
+    function cache:clear() entries, order, bytes = {}, {}, 0 end
+    function cache:stats() return #order, bytes end
+    return cache
+end
+
+-- Valid A-B intervals must have a measurable duration and fit the song.
+function Core.isValidLoopRange(a, b, duration)
+    if type(a) ~= "number" or type(b) ~= "number" or type(duration) ~= "number" then return false end
+    if a ~= a or b ~= b or duration ~= duration then return false end
+    return a >= 0 and b <= duration and b - a >= 0.1
+end
+
+-- Convert CC64 to deferred note releases on a tick-sorted MIDI timeline.
+-- State is per MIDI channel, not per track. Each release keeps its noteId,
+-- allowing seek restoration and voice stealing to remain independent.
+function Core.applyMidiSustain(events)
+    local down, pending, result = {}, {}, {}
+    local serial, lastTick = 0, 0
+    local function emit(event, time)
+        local copy = {}
+        for key, value in pairs(event) do copy[key] = value end
+        serial = serial + 1
+        copy.order = serial
+        if time ~= nil then copy.time = time end
+        result[#result + 1] = copy
+    end
+    local function flush(channel, time)
+        local queue = pending[channel] or {}
+        for _, event in ipairs(queue) do emit(event, time) end
+        pending[channel] = nil
+    end
+    for _, event in ipairs(events) do
+        lastTick = math.max(lastTick, event.time or 0)
+        local channel = event.channel
+        if event.kind == "sustain" and channel then
+            local isDown = (event.value or 0) >= 64
+            if down[channel] and not isDown then flush(channel, event.time) end
+            down[channel] = isDown
+        elseif event.kind == "release" and channel and down[channel] then
+            pending[channel] = pending[channel] or {}
+            pending[channel][#pending[channel] + 1] = event
+        else
+            emit(event)
+        end
+    end
+    -- A malformed file may omit pedal-up: release deferred notes at its end.
+    local channels = {}
+    for channel in pairs(pending) do channels[#channels + 1] = channel end
+    table.sort(channels)
+    for _, channel in ipairs(channels) do flush(channel, lastTick) end
+    return result
+end
+
+-- Transpose first, then fold by whole octaves into the current layout.
+-- A compact range may not contain every pitch class; return nil in that case.
+function Core.mapMidiNote(note, semitones, low, high, fold)
+    if type(note) ~= "number" or type(low) ~= "number" or type(high) ~= "number" or low > high then return nil end
+    local shifted = note + (tonumber(semitones) or 0)
+    if fold then
+        if shifted < low then shifted = shifted + math.ceil((low - shifted) / 12) * 12 end
+        if shifted > high then shifted = shifted - math.ceil((shifted - high) / 12) * 12 end
+    end
+    if shifted < low or shifted > high then return nil end
+    return shifted
+end
+
+-- Quantize press events to the text-sheet half-beat grid. This is a lossy
+-- export: MIDI velocities, sustain, durations and tempo changes are not encoded.
+function Core.eventsToTextSheet(events, bpm, maxSteps)
+    bpm = tonumber(bpm) or 120
+    if bpm <= 0 or bpm ~= bpm then return nil, "Invalid BPM" end
+    maxSteps = math.max(1, math.floor(tonumber(maxSteps) or 100000))
+    local step = 30 / bpm
+    local slots, maxSlot = {}, 0
+    for _, event in ipairs(events or {}) do
+        if event.kind == "press" and type(event.songTime) == "number" and event.songTime >= 0 then
+            local slot = math.floor(event.songTime / step + 0.5)
+            if slot > maxSteps then return nil, "Song is too long to export at this tempo" end
+            slots[slot] = slots[slot] or {chars = {}, seen = {}}
+            for _, char in ipairs(event.chars or {}) do
+                if type(char) == "string" and #char == 1 and not char:match("[%s%[%]|%-]") and not slots[slot].seen[char] then
+                    slots[slot].seen[char] = true
+                    slots[slot].chars[#slots[slot].chars + 1] = char
+                end
+            end
+            if slot > maxSlot then maxSlot = slot end
+        end
+    end
+    local result, found, cursor = {}, false, 0
+    for slot = 0, maxSlot do
+        local item = slots[slot]
+        if item and #item.chars > 0 then
+            if slot > cursor then result[#result + 1] = string.rep(" ", slot - cursor) end
+            local text = table.concat(item.chars)
+            if #item.chars > 1 then
+                text = "[" .. text .. "]"
+                cursor = slot + 1 -- sheet chords advance one half-beat
+            else
+                cursor = slot
+            end
+            result[#result + 1] = text
+            found = true
+        end
+    end
+    if not found then return nil, "No playable MIDI notes to export" end
+    return table.concat(result)
+end
+
+-- Decode tracks, names, channels and note identities into a shared timeline.
+-- This does not map notes to executor keys; the player applies its layout.
+function Core.decodeMidiTimeline(data)
+    if type(data) ~= "string" then error("MIDI data must be a string") end
+    local events, tracks, pending = {}, {}, {}
+    local division, time, order, noteId, trackNo = 96, 0, 0, 0, 0
+    local headerSeen, declaredTracks = false, 0
+    local function append(event)
+        order = order + 1
+        event.time, event.order, event.track = time, order, trackNo
+        events[#events + 1] = event
+    end
+    local function noteOff(channel, note)
+        local key = channel * 128 + note
+        local queue = pending[key]
+        if queue and queue.head <= queue.tail then
+            local releasedId = queue.ids[queue.head]
+            queue.ids[queue.head] = nil
+            queue.head = queue.head + 1
+            if queue.head > queue.tail then pending[key] = nil end
+            append({kind = "release", chars = {}, midiNote = note, noteId = releasedId, channel = channel})
+        end
+    end
+    Core.processMidi(Core.createStringStream(data), function(name, ...)
+        if name == "header" then
+            if headerSeen or trackNo ~= 0 then error("Unexpected MIDI header") end
+            local _, count, value = ...
+            headerSeen, declaredTracks, division = true, count, value
+            if count < 1 then error("MIDI declares no tracks") end
+        elseif name == "track" then
+            if not headerSeen then error("MIDI track appears before header") end
+            trackNo = ...; time, pending = 0, {}
+            tracks[trackNo] = {index = trackNo, name = "", instrument = "", channels = {}}
+        elseif name == "deltatime" then
+            time = time + (...)
+        elseif name == "sequencerOrTrackName" then
+            if tracks[trackNo] then tracks[trackNo].name = ... end
+        elseif name == "instrumentName" then
+            if tracks[trackNo] then tracks[trackNo].instrument = ... end
+        elseif name == "noteOn" then
+            local channel, note, velocity = ...
+            if tracks[trackNo] then tracks[trackNo].channels[channel] = true end
+            if velocity == 0 then noteOff(channel, note) else
+                noteId = noteId + 1
+                local key = channel * 128 + note
+                pending[key] = pending[key] or {ids = {}, head = 1, tail = 0}
+                local queue = pending[key]
+                queue.tail = queue.tail + 1
+                queue.ids[queue.tail] = noteId
+                append({kind = "press", chars = {}, midiNote = note, velocity = velocity, noteId = noteId, channel = channel})
+            end
+        elseif name == "noteOff" then
+            local channel, note = ...
+            noteOff(channel, note)
+        elseif name == "controller" then
+            local channel, number, value = ...
+            if number == 64 then append({kind = "sustain", channel = channel, value = value}) end
+        elseif name == "setTempo" then
+            local value = ...
+            if type(value) == "number" and value > 0 then append({type = "tempo", tempo = value}) end
+        elseif name == "endOfTrack" then
+            append({kind = "trackEnd"})
+        end
+    end)
+    if not headerSeen then error("Missing MIDI header") end
+    if trackNo ~= declaredTracks then error("MIDI track count does not match header") end
+    Core.sortMidiEvents(events)
+    events = Core.applyMidiSustain(events)
+    local released = {}
+    for _, event in ipairs(events) do
+        if event.kind == "release" then released[event.noteId] = true end
+    end
+    for _, event in ipairs(events) do
+        if event.kind == "press" then event.hasRelease = released[event.noteId] == true end
+    end
+    local isSmpte = bit32.band(division, 0x8000) ~= 0
+    local ticksPerSecond = 0
+    if isSmpte then
+        local fps = bit32.rshift(division, 8)
+        if fps >= 128 then fps = fps - 256 end
+        fps = math.abs(fps)
+        if fps == 29 then fps = 29.97 end
+        ticksPerSecond = fps * bit32.band(division, 0xFF)
+        if ticksPerSecond <= 0 then isSmpte, division = false, 96 end
+    elseif division <= 0 then division = 96 end
+    local duration = Core.buildTimeline(events, division, isSmpte, ticksPerSecond)
+    return events, tracks, duration
+end
+
+function Core.hasMidiNotes(events)
+    for _, event in ipairs(events or {}) do
+        if event.kind == "press" and event.midiNote ~= nil then return true end
+    end
+    return false
+end
+
+function Core.isMidiNoteEnabled(track, channel, mutedTracks, mutedChannels, soloTrack)
+    if mutedChannels and mutedChannels[channel] then return false end
+    if soloTrack ~= nil and track ~= soloTrack then return false end
+    return not (mutedTracks and mutedTracks[track])
+end
+
+-- Humanize the already timed events, pairing each note's offset with its
+-- release. Chord rolls are capped at 250ms to avoid unbounded long chords.
+-- rng returns a number in [0,1], and can be injected for deterministic tests.
+function Core.humanizeMidiEvents(events, jitterMs, rollMs, rng)
+    jitterMs = math.max(0, math.min(30, tonumber(jitterMs) or 0))
+    rollMs = math.max(0, math.min(30, tonumber(rollMs) or 0))
+    rng = rng or math.random
+    local copies, offsets, chordCounts = {}, {}, {}
+    local duration = 0
+    for index, event in ipairs(events or {}) do
+        local copy = {}
+        for key, value in pairs(event) do copy[key] = value end
+        copy._humanizeOrder = index
+        if event.kind == "press" and event.noteId ~= nil then
+            local group = event.songTime or 0
+            local ordinal = chordCounts[group] or 0
+            chordCounts[group] = ordinal + 1
+            local random = jitterMs > 0 and rng() or 0.5
+            random = math.max(0, math.min(1, tonumber(random) or 0.5))
+            offsets[event.noteId] = (random * 2 - 1) * jitterMs / 1000 + math.min(ordinal * rollMs, 250) / 1000
+        end
+        local offset = event.noteId and offsets[event.noteId] or 0
+        copy.songTime = math.max(0, (event.songTime or 0) + offset)
+        copies[#copies + 1] = copy
+        duration = math.max(duration, copy.songTime)
+    end
+    table.sort(copies, function(a, b)
+        if a.songTime == b.songTime then return a._humanizeOrder < b._humanizeOrder end
+        return a.songTime < b.songTime
+    end)
+    for _, event in ipairs(copies) do event._humanizeOrder = nil end
+    return copies, duration
+end
+
+-- Chat requests never accept URLs or executable commands, only catalog terms.
+function Core.parseSongRequest(message)
+    if type(message) ~= "string" or #message > 256 then return nil end
+    local command, query = message:match("^%s*!([%a]+)%s+(.+)%s*$")
+    if not command or not query then return nil end
+    command = command:lower()
+    if command ~= "play" and command ~= "request" then return nil end
+    query = query:match("^%s*(.-)%s*$")
+    if query == "" or #query > 100 or query:lower():find("https?://") then return nil end
+    return command, query
+end
+
+function Core.parseUserIdSet(text)
+    local set = {}
+    for token in tostring(text or ""):gmatch("[^,%s]+") do
+        if token:match("^%d+$") then
+            local normalized = token:gsub("^0+", "")
+            if normalized ~= "" then set[normalized] = true end
+        end
+    end
+    return set
+end
+
+-- Collect unique, playable keys at one timestamp. Same-time release or tempo
+-- events may be interspersed with presses in a MIDI track.
+function Core.practiceChord(events, startIndex)
+    local start = events and events[startIndex]
+    if not start or start.kind ~= "press" then return {} end
+    local time, result, seen = start.songTime, {}, {}
+    for index = startIndex, #events do
+        local event = events[index]
+        if event.songTime ~= time then break end
+        if event.kind == "press" then
+            for _, char in ipairs(event.chars or {}) do
+                if not seen[char] then seen[char] = true; result[#result + 1] = char end
+            end
+        end
+    end
+    return result
+end
+
+-- Render-friendly upcoming key list; no Roblox dependencies or allocations for
+-- events beyond the requested horizon/limit.
+function Core.getUpcomingNotes(events, startIndex, now, horizon, limit)
+    local result = {}
+    now = tonumber(now) or 0
+    horizon = tonumber(horizon) or 2
+    limit = math.max(0, math.floor(tonumber(limit) or 24))
+    if horizon <= 0 or limit == 0 then return result end
+    for index = math.max(1, math.floor(tonumber(startIndex) or 1)), #(events or {}) do
+        local event = events[index]
+        local time = tonumber(event.songTime) or 0
+        if time > now + horizon then break end
+        if event.kind == "press" then
+            local progress = 1 - math.max(0, math.min(1, (time - now) / horizon))
+            for _, char in ipairs(event.chars or {}) do
+                result[#result + 1] = {char = char, progress = progress, songTime = time}
+                if #result >= limit then return result end
+            end
+        end
+    end
+    return result
+end
+
+-- Validate untrusted persisted lists before presenting or playing them.
+function Core.sanitizeSongEntries(entries, limit)
+    local result, seen = {}, {}
+    limit = math.max(0, math.min(500, math.floor(tonumber(limit) or 500)))
+    if type(entries) ~= "table" then return result end
+    for _, entry in ipairs(entries) do
+        if #result >= limit then break end
+        if type(entry) == "table" and type(entry.title) == "string" and type(entry.url) == "string" then
+            local title = entry.title:match("^%s*(.-)%s*$")
+            local url = entry.url:match("^%s*(.-)%s*$")
+            if title ~= "" and #title <= 200 and not title:find("[%c]") and #url <= 2048
+                and url:match("^https?://[^/%s]+") and not url:find("[%c%s]") and not seen[url] then
+                seen[url] = true
+                result[#result + 1] = {title = title, url = url}
+            end
+        end
+    end
+    return result
+end
 
 return Core

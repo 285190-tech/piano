@@ -38,4 +38,4 @@ jobs:
 
       - name: Run unit tests (fengari)
         working-directory: tests
-        run: node run_tests.js
+        run: npm test

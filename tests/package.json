@@ -4,7 +4,7 @@
   "private": true,
   "description": "Core tests and piano.lua syntax checks via fengari (Lua 5.3 in JavaScript)",
   "scripts": {
-    "test": "node run_tests.js"
+    "test": "node run_tests.js && node run_playback_tests.js && node run_practice_tests.js && node run_queue_tests.js && node run_chat_tests.js && node run_verify_tests.js && node run_voice_tests.js && node run_player_state_tests.js"
   },
   "devDependencies": {
     "fengari": "^0.1.5"

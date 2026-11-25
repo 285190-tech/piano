@@ -119,6 +119,11 @@ local layouts = {
 }
 
 local currentLayoutName = "full"
+local midiMapping = {
+    transpose = 0, octave = 0, fold = false, version = 0,
+    mutedChannels = {[10] = true}, mutedTracks = {}, soloTrack = nil,
+    jitterMs = 0, rollMs = 0,
+}
 local MidiToChar = {}
 local CharToKeyInfo = {}
 -- keyNote[keyEnum] = MIDI note currently held (for legato / voice stealing)
@@ -170,9 +175,7 @@ local function buildLayout(layoutName)
     for i = #activeVoices, 1, -1 do
         local v = activeVoices[i]
         if v and v.keyEnum then
-            pcall(function()
-                VirtualInputManager:SendKeyEvent(false, v.keyEnum, false, game)
-            end)
+            pcall(VirtualInputManager.SendKeyEvent, VirtualInputManager, false, v.keyEnum, false, game)
         end
         activeVoices[i] = nil
     end
@@ -205,7 +208,7 @@ local function enforceVoiceLimit()
         if oldest and oldest.keyEnum then
             local keyEnum = oldest.keyEnum
             if keyHeld[keyEnum] then
-                VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
+                pcall(VirtualInputManager.SendKeyEvent, VirtualInputManager, false, keyEnum, false, game)
             end
             keyPressId[keyEnum] = (keyPressId[keyEnum] or 0) + 1
             keyHeld[keyEnum] = false
@@ -229,7 +232,7 @@ local function releaseNoteToken(keyEnum, noteToken)
     keyPressCount[keyEnum] = count
     if count == 0 then
         if keyHeld[keyEnum] then
-            VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
+            pcall(VirtualInputManager.SendKeyEvent, VirtualInputManager, false, keyEnum, false, game)
         end
         keyHeld[keyEnum] = false
         activePress[keyEnum] = nil
@@ -238,7 +241,7 @@ local function releaseNoteToken(keyEnum, noteToken)
     return true
 end
 
-local function pressChar(char, velocity, noteId)
+local function pressChar(char, velocity, noteId, hasRelease)
     local info = CharToKeyInfo[char]
     if not info or not info.keyEnum then return end
 
@@ -252,7 +255,7 @@ local function pressChar(char, velocity, noteId)
     -- Re-triggering the same key: in legato mode the previous press
     -- sustains (overlap); otherwise release it first (re-articulation).
     if keyHeld[keyEnum] and not legatoMode then
-        VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
+        pcall(VirtualInputManager.SendKeyEvent, VirtualInputManager, false, keyEnum, false, game)
         keyHeld[keyEnum] = false
         keyPressCount[keyEnum] = 0
         activeNoteTokens[keyEnum] = {}
@@ -262,14 +265,16 @@ local function pressChar(char, velocity, noteId)
     enforceVoiceLimit()
 
     if info.needsShift then
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
+        pcall(VirtualInputManager.SendKeyEvent, VirtualInputManager, true, Enum.KeyCode.LeftShift, false, game)
     end
 
-    VirtualInputManager:SendKeyEvent(true, keyEnum, false, game)
+    pcall(VirtualInputManager.SendKeyEvent, VirtualInputManager, true, keyEnum, false, game)
     keyHeld[keyEnum] = true
     activePress[keyEnum] = pressId
     activeNoteTokens[keyEnum] = activeNoteTokens[keyEnum] or {}
-    activeNoteTokens[keyEnum][noteToken] = true
+    -- Retain the unique press generation so a delayed fallback from an old
+    -- playback cannot release a later press with the same MIDI note ID.
+    activeNoteTokens[keyEnum][noteToken] = pressId
     keyPressCount[keyEnum] = (keyPressCount[keyEnum] or 0) + 1
     keyNote[keyEnum] = info.note
 
@@ -284,17 +289,20 @@ local function pressChar(char, velocity, noteId)
     })
 
     if info.needsShift then
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
+        pcall(VirtualInputManager.SendKeyEvent, VirtualInputManager, false, Enum.KeyCode.LeftShift, false, game)
     end
 
     -- Safety net: if the file never sends a matching noteOff, release this
     -- individual press after a velocity-scaled fallback hold.
     local hold = FALLBACK_HOLD_SECONDS * (0.6 + 0.8 * math.clamp(mappedVel, 0, 1))
-    task.delay(hold, function()
+    if not hasRelease then task.delay(hold, function()
         -- Release only this press. In legato mode another overlapping note
         -- may still be holding the same physical key.
-        releaseNoteToken(keyEnum, noteToken)
-    end)
+        local tokens = activeNoteTokens[keyEnum]
+        if tokens and tokens[noteToken] == pressId then
+            releaseNoteToken(keyEnum, noteToken)
+        end
+    end) end
 end
 
 local function releaseChar(char, noteId)
@@ -313,6 +321,11 @@ local currentPlaybackSpeed = 1
 local playing = false
 local playbackId = 0
 local stopHooks = {}
+local onPlaybackFinished -- queue callback, assigned after the queue UI is created
+local enqueueRequestedSong -- assigned after the queue UI is created
+local enqueuePlaylist -- assigned after the queue UI is created
+local addFavoriteByUrl -- assigned after favorites UI is created
+local currentMidiEvents = nil -- last successfully parsed MIDI timeline for sheet export
 
 local PlayerHudState = {
     enabled = true,
@@ -329,6 +342,14 @@ local PlayerHudState = {
     -- Next-note highlight: chars of the upcoming press event, or nil.
     highlightNext = false,
     nextNoteChars = nil,
+    loopSong = false,
+    practiceMode = false,
+    waitingForNotes = nil,
+    visualizerEnabled = false,
+    visualEvents = nil,
+    nextEventIndex = 1,
+    loopA = nil,
+    loopB = nil,
 }
 
 local function formatDuration(seconds)
@@ -336,6 +357,7 @@ local function formatDuration(seconds)
 end
 
 local function setHudLoading(title, subtitle)
+    currentMidiEvents = nil
     PlayerHudState.title = tostring(title or "Loading song...")
     PlayerHudState.subtitle = tostring(subtitle or "Loading...")
     PlayerHudState.currentTime = 0
@@ -346,6 +368,7 @@ local function setHudLoading(title, subtitle)
 end
 
 local function setHudFailed(reason)
+    currentMidiEvents = nil
     PlayerHudState.status = "idle"
     PlayerHudState.paused = false
     PlayerHudState.currentTime = 0
@@ -366,9 +389,7 @@ local function releaseHeldKeys()
             activePress[keyEnum] = nil
             keyPressCount[keyEnum] = 0
             activeNoteTokens[keyEnum] = {}
-            pcall(function()
-                VirtualInputManager:SendKeyEvent(false, keyEnum, false, game)
-            end)
+            pcall(VirtualInputManager.SendKeyEvent, VirtualInputManager, false, keyEnum, false, game)
         end
     end
     for i = #activeVoices, 1, -1 do
@@ -383,6 +404,8 @@ local function stopPlayback()
     PlayerHudState.seekTarget = nil
     PlayerHudState.currentTime = 0
     PlayerHudState.nextNoteChars = nil
+    PlayerHudState.waitingForNotes = nil
+    PlayerHudState.visualEvents = nil
     if PlayerHudState.replayFn then
         PlayerHudState.status = "stopped"
     else
@@ -399,6 +422,7 @@ local function togglePausePlayback()
         PlayerHudState.paused = not PlayerHudState.paused
         if PlayerHudState.paused then
             PlayerHudState.status = "paused"
+            PlayerHudState.nextNoteChars = nil
             releaseHeldKeys()
         else
             PlayerHudState.status = "playing"
@@ -406,6 +430,22 @@ local function togglePausePlayback()
     elseif PlayerHudState.replayFn then
         PlayerHudState.replayFn()
     end
+end
+
+-- Seek requests work while paused and stack if several buttons are clicked
+-- before the player thread handles the previous request.
+local function requestSeek(target)
+    if not playing or PlayerHudState.totalTime <= 0 or type(target) ~= "number" or target ~= target then
+        return false
+    end
+    PlayerHudState.seekTarget = math.clamp(target, 0, PlayerHudState.totalTime)
+    PlayerHudState.nextNoteChars = nil
+    return true
+end
+
+local function seekRelative(offset)
+    local current = PlayerHudState.seekTarget or PlayerHudState.currentTime
+    return requestSeek(current + offset)
 end
 
 local function findEventIndexAtTime(events, targetTime)
@@ -427,9 +467,55 @@ local function restoreHeldNotesAtIndex(events, nextIndex, seekIndex)
     for _, entry in ipairs(Core.getHeldNotesAtIndex(events, nextIndex, seekIndex)) do
         local event = entry.event
         for _, char in ipairs(event.chars) do
-            pressChar(char, event.velocity, event.noteId)
+            pressChar(char, event.velocity, event.noteId, event.hasRelease)
         end
     end
+end
+
+-- Wait for actual keyboard input instead of injecting the next chord. The
+-- connection is scoped to the wait and always disconnected on interruption.
+local function waitForPracticeChord(events, index, myId, mappingVersion)
+    local keys = Core.practiceChord(events, index)
+    if #keys == 0 then return true end
+    local remaining, count = {}, 0
+    for _, char in ipairs(keys) do
+        if CharToKeyInfo[char] then remaining[char] = true; count = count + 1 end
+    end
+    if count == 0 then return true end
+    PlayerHudState.waitingForNotes = keys
+    local ok, connection = pcall(function()
+        return UserInputService.InputBegan:Connect(function(input)
+            if not playing or playbackId ~= myId or PlayerHudState.paused or not PlayerHudState.practiceMode then return end
+            local focusedOk, focused = pcall(UserInputService.GetFocusedTextBox, UserInputService)
+            if focusedOk and focused then return end
+            local shiftOk, shifted = pcall(function()
+                return UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+            end)
+            if not shiftOk then return end
+            for char in pairs(remaining) do
+                local info = CharToKeyInfo[char]
+                if info and input.KeyCode == info.keyEnum and info.needsShift == shifted then
+                    remaining[char] = nil
+                    count = count - 1
+                    break
+                end
+            end
+        end)
+    end)
+    if not ok or not connection then
+        if PlayerHudState.waitingForNotes == keys then PlayerHudState.waitingForNotes = nil end
+        PlayerHudState.practiceMode = false
+        warn("[Piano] Practice mode unavailable: could not listen for keyboard input")
+        return false
+    end
+    while count > 0 and playing and playbackId == myId and PlayerHudState.practiceMode
+        and PlayerHudState.seekTarget == nil and midiMapping.version == mappingVersion do
+        task.wait(0.04)
+    end
+    pcall(function() connection:Disconnect() end)
+    if PlayerHudState.waitingForNotes == keys then PlayerHudState.waitingForNotes = nil end
+    return count == 0 and playing and playbackId == myId and PlayerHudState.practiceMode
+        and PlayerHudState.seekTarget == nil and midiMapping.version == mappingVersion
 end
 
 -- ==========================================
@@ -447,6 +533,8 @@ local function runEventPlayer(events, myId, onStart, totalDuration, meta)
     PlayerHudState.subtitle = songSubtitle
     PlayerHudState.currentTime = 0
     PlayerHudState.totalTime = totalDuration
+    PlayerHudState.loopA = nil
+    PlayerHudState.loopB = nil
     PlayerHudState.paused = false
     PlayerHudState.seekTarget = nil
     PlayerHudState.status = "playing"
@@ -456,29 +544,83 @@ local function runEventPlayer(events, myId, onStart, totalDuration, meta)
         pcall(onStart)
     end
 
+    local function remapMidiEvents()
+        local low = currentLayoutName == "compact" and compactStartNote or startNote
+        local high = low + (currentLayoutName == "compact" and 11 or 60)
+        for _, event in ipairs(events) do
+            if event.midiNote ~= nil then
+                local enabled = Core.isMidiNoteEnabled(event.track, event.channel, midiMapping.mutedTracks, midiMapping.mutedChannels, midiMapping.soloTrack)
+                local note = enabled and Core.mapMidiNote(event.midiNote, midiMapping.transpose + 12 * midiMapping.octave, low, high, midiMapping.fold)
+                local char = note and MidiToChar[note]
+                event.chars = char and {char} or {}
+            end
+        end
+    end
+    remapMidiEvents()
+    PlayerHudState.visualEvents = events
+    PlayerHudState.nextEventIndex = 1
+    local mappingVersion = midiMapping.version
+    local lastPracticeMode = PlayerHudState.practiceMode
+    local practiceHandledAt = nil
     local idx = 1
     local nEvents = #events
     local seekIndex = Core.buildSeekIndex(events, 256)
     local lastClock = tick()
     local lastYieldClock = lastClock
 
-    while idx <= nEvents do
+    while true do
         if not playing or playbackId ~= myId then break end
+        PlayerHudState.nextEventIndex = idx
+        if lastPracticeMode ~= PlayerHudState.practiceMode then
+            releaseHeldKeys()
+            lastPracticeMode = PlayerHudState.practiceMode
+            practiceHandledAt = nil
+            if not lastPracticeMode and not PlayerHudState.paused then
+                restoreHeldNotesAtIndex(events, idx, seekIndex)
+            end
+        end
+        if mappingVersion ~= midiMapping.version then
+            releaseHeldKeys()
+            remapMidiEvents()
+            mappingVersion = midiMapping.version
+            practiceHandledAt = nil
+            if not PlayerHudState.paused and not PlayerHudState.practiceMode then restoreHeldNotesAtIndex(events, idx, seekIndex) end
+            PlayerHudState.nextNoteChars = nil
+        end
+        if idx > nEvents and PlayerHudState.seekTarget == nil then
+            -- Reuse the current timeline; do not re-fetch or recurse. Empty
+            -- and zero-duration songs must not spin forever in a tight loop.
+            if PlayerHudState.loopSong and nEvents > 0 and totalDuration > 0 then
+                releaseHeldKeys()
+                PlayerHudState.currentTime = 0
+                PlayerHudState.nextNoteChars = nil
+                practiceHandledAt = nil
+                idx = 1
+                lastClock = tick()
+                lastYieldClock = lastClock
+            else
+                break
+            end
+        end
 
         if PlayerHudState.seekTarget ~= nil then
             local target = math.clamp(PlayerHudState.seekTarget, 0, totalDuration)
             PlayerHudState.seekTarget = nil
+            PlayerHudState.nextNoteChars = nil
+            practiceHandledAt = nil
             releaseHeldKeys()
             PlayerHudState.currentTime = target
             idx = findEventIndexAtTime(events, target)
-            restoreHeldNotesAtIndex(events, idx, seekIndex)
+            if not PlayerHudState.paused and not PlayerHudState.practiceMode then
+                restoreHeldNotesAtIndex(events, idx, seekIndex)
+            end
             lastClock = tick()
             lastYieldClock = lastClock
         elseif PlayerHudState.paused then
             releaseHeldKeys()
             task.wait(0.04)
             if playing and playbackId == myId and not PlayerHudState.paused
-                and PlayerHudState.seekTarget == nil then
+                and not PlayerHudState.practiceMode and PlayerHudState.seekTarget == nil then
                 restoreHeldNotesAtIndex(events, idx, seekIndex)
             end
             lastClock = tick()
@@ -490,20 +632,35 @@ local function runEventPlayer(events, myId, onStart, totalDuration, meta)
             local dtReal = math.min(now - lastClock, 0.5)
             lastClock = now
             local speed = math.max(currentPlaybackSpeed, 0.05)
-            PlayerHudState.currentTime = math.min(totalDuration, PlayerHudState.currentTime + dtReal * speed)
-
+            local validLoop = Core.isValidLoopRange(PlayerHudState.loopA, PlayerHudState.loopB, totalDuration)
+            local loopEnd = validLoop and PlayerHudState.loopB or nil
+            local nextTime = math.min(totalDuration, PlayerHudState.currentTime + dtReal * speed)
+            PlayerHudState.currentTime = loopEnd and math.min(nextTime, loopEnd) or nextTime
+            local atLoopEnd = loopEnd ~= nil and PlayerHudState.currentTime >= loopEnd
             local ev = events[idx]
-            if PlayerHudState.currentTime + 0.0005 >= ev.songTime then
-                while idx <= nEvents and PlayerHudState.currentTime + 0.0005 >= events[idx].songTime do
+            if atLoopEnd and ev.songTime >= loopEnd then
+                PlayerHudState.seekTarget = PlayerHudState.loopA
+            elseif PlayerHudState.currentTime + 0.0005 >= ev.songTime then
+                while idx <= nEvents and PlayerHudState.currentTime + 0.0005 >= events[idx].songTime
+                    and (not atLoopEnd or events[idx].songTime < loopEnd) do
                     if not playing or playbackId ~= myId or PlayerHudState.paused or PlayerHudState.seekTarget ~= nil then
                         break
                     end
                     local curEv = events[idx]
                     if curEv.kind == "press" then
-                        for _, char in ipairs(curEv.chars) do
-                            pressChar(char, curEv.velocity, curEv.noteId)
+                        if PlayerHudState.practiceMode then
+                            if practiceHandledAt ~= curEv.songTime then
+                                local completed = waitForPracticeChord(events, idx, myId, mappingVersion)
+                                lastClock, lastYieldClock = tick(), tick()
+                                if not completed then break end
+                                practiceHandledAt = curEv.songTime
+                            end
+                        else
+                            for _, char in ipairs(curEv.chars) do
+                                pressChar(char, curEv.velocity, curEv.noteId, curEv.hasRelease)
+                            end
                         end
-                    elseif curEv.kind == "release" then
+                    elseif curEv.kind == "release" and not PlayerHudState.practiceMode then
                         for _, char in ipairs(curEv.chars) do
                             releaseChar(char, curEv.noteId)
                         end
@@ -514,6 +671,13 @@ local function runEventPlayer(events, myId, onStart, totalDuration, meta)
                         lastYieldClock = tick()
                         lastClock = tick()
                     end
+                end
+                -- Deliver every event before B before seeking back; coarse
+                -- frames and high playback speeds can cross multiple notes.
+                if atLoopEnd and playing and playbackId == myId and not PlayerHudState.paused
+                    and PlayerHudState.seekTarget == nil
+                    and (idx > nEvents or events[idx].songTime >= loopEnd) then
+                    PlayerHudState.seekTarget = PlayerHudState.loopA
                 end
             else
                 -- Next-note highlight: peek at the upcoming press event so the
@@ -547,15 +711,22 @@ local function runEventPlayer(events, myId, onStart, totalDuration, meta)
     end
 
     if playbackId == myId then
+        local finishedNaturally = playing and idx > nEvents
         playing = false
         PlayerHudState.paused = false
-        if idx > nEvents then
+        PlayerHudState.nextNoteChars = nil
+        PlayerHudState.waitingForNotes = nil
+        PlayerHudState.visualEvents = nil
+        if finishedNaturally then
             PlayerHudState.currentTime = totalDuration
             PlayerHudState.status = "finished"
         elseif PlayerHudState.status ~= "stopped" then
             PlayerHudState.status = "stopped"
         end
         releaseHeldKeys()
+        if finishedNaturally and nEvents > 0 and onPlaybackFinished then
+            pcall(onPlaybackFinished, myId)
+        end
     end
     return true
 end
@@ -564,6 +735,7 @@ end
 -- MIDI parsing & playback
 -- ==========================================
 local recordHistory -- assigned with the playback-history state below
+local updateMidiTrackControls -- assigned when the Obsidian controls are created
 local function parseAndPlayMidi(midiString, myId, onStart, meta, replayFn)
     if playbackId ~= myId then return false end
 
@@ -580,103 +752,33 @@ local function parseAndPlayMidi(midiString, myId, onStart, meta, replayFn)
         midiString = midiString:sub(mthdIdx)
     end
 
-    local stream = Core.createStringStream(midiString)
-
-    local division = 96
-    local events = {}
-    local currentTime = 0
-    local order = 0
-    local nextNoteId = 0
-    local pendingNotes = {}
-
-    local function addNoteOff(channel, key)
-        if channel == 10 then return end
-        local char = MidiToChar[key]
-        if not char then return end
-        local noteKey = channel * 128 + key
-        local queue = pendingNotes[noteKey]
-        if not queue or #queue == 0 then return end
-        local noteId = table.remove(queue, 1)
-        order = order + 1
-        table.insert(events, {time = currentTime, order = order, kind = "release", chars = {char}, noteId = noteId})
-    end
-
-    local ok, err = pcall(Core.processMidi, stream, function(name, ...)
-        if name == "header" then
-            local _, _, div = ...
-            division = div
-        elseif name == "track" then
-            currentTime = 0
-            pendingNotes = {}
-        elseif name == "deltatime" then
-            local ticks = ...
-            currentTime = currentTime + ticks
-        elseif name == "noteOn" then
-            local channel, key, velocity = ...
-            if velocity == 0 then
-                addNoteOff(channel, key)
-            elseif channel ~= 10 then
-                local char = MidiToChar[key]
-                if char then
-                    order = order + 1
-                    nextNoteId = nextNoteId + 1
-                    local noteKey = channel * 128 + key
-                    pendingNotes[noteKey] = pendingNotes[noteKey] or {}
-                    table.insert(pendingNotes[noteKey], nextNoteId)
-                    table.insert(events, {time = currentTime, order = order, kind = "press", chars = {char}, velocity = velocity, noteId = nextNoteId})
-                end
-            end
-        elseif name == "noteOff" then
-            local channel, key = ...
-            addNoteOff(channel, key)
-        elseif name == "setTempo" then
-            local rawTempo = ...
-            -- Tempo events are kept in the timeline so the timestamp
-            -- precompute below can apply tempo changes at the right tick.
-            if type(rawTempo) == "number" and rawTempo > 0 then
-                order = order + 1
-                table.insert(events, {time = currentTime, order = order, type = "tempo", tempo = rawTempo})
-            end
-        end
-    end)
-
+    local ok, events, tracks, totalDuration = pcall(Core.decodeMidiTimeline, midiString)
     if not ok then
-        warn("[Piano] MIDI parse error:", err)
+        warn("[Piano] MIDI parse error:", events)
         if playbackId == myId then
             playing = false
             setHudFailed("MIDI parse error")
         end
         return false
     end
-
     if playbackId ~= myId then return false end
-
-    -- Preserve original MIDI order for events at the same tick, including
-    -- press-then-release pairs for zero-duration notes.
-    Core.sortMidiEvents(events)
-
-    local isSmpte = bit32.btest(division, 0x8000)
-    local smpteTicksPerSec = 0
-    if isSmpte then
-        local fpsRaw = bit32.rshift(division, 8)
-        if fpsRaw >= 128 then fpsRaw = fpsRaw - 256 end
-        local fps = math.abs(fpsRaw)
-        if fps == 29 then fps = 29.97 end
-        local subframes = bit32.band(division, 0xFF)
-        if fps > 0 and subframes > 0 then
-            smpteTicksPerSec = fps * subframes
-        else
-            isSmpte = false
-            division = 96
-        end
-    elseif division <= 0 then
-        division = 96
+    if not Core.hasMidiNotes(events) then
+        setHudFailed("MIDI contains no notes")
+        return false
     end
 
-    -- Precompute real song timestamps (at 1.0x speed) for progress & seeking
-    local totalDuration = Core.buildTimeline(events, division, isSmpte, smpteTicksPerSec)
+    -- Humanization is baked into a new timeline at load time; release events
+    -- receive the same offset as their note-on so note lengths remain intact.
+    if midiMapping.jitterMs > 0 or midiMapping.rollMs > 0 then
+        events, totalDuration = Core.humanizeMidiEvents(events, midiMapping.jitterMs, midiMapping.rollMs)
+    end
+    midiMapping.mutedTracks = {}
+    midiMapping.soloTrack = nil
+    midiMapping.version = midiMapping.version + 1
+    if updateMidiTrackControls then updateMidiTrackControls(tracks) end
 
     PlayerHudState.replayFn = replayFn
+    currentMidiEvents = events
     if #events > 0 and replayFn and recordHistory then
         recordHistory(meta and meta.title, meta and meta.subtitle, replayFn)
     end
@@ -689,6 +791,7 @@ end
 local function playTextSheet(sheet, bpm, myId, meta, replayFn)
     if playbackId ~= myId then return false end
 
+    currentMidiEvents = nil
     local events, totalDuration = Core.buildTextSheetEvents(sheet, bpm, function(c)
         return CharToKeyInfo[c] ~= nil
     end)
@@ -834,7 +937,15 @@ local function requestWithRetry(url, customHeaders, maxAttempts, retryDelay, sho
     return false, nil, lastErr, lastStatus
 end
 
+-- Only cache public requests without custom headers: authenticated/redirected
+-- responses can depend on cookies and must never be shared by URL alone.
+local midiCache = Core.newMidiCache(16, 8 * 1024 * 1024)
 local function fetchMidiBytesWithRetry(url, customHeaders, shouldAbort)
+    if shouldAbort and shouldAbort() then return false, nil, "Aborted" end
+    if not customHeaders then
+        local cached = midiCache:get(url)
+        if cached then return true, cached, nil, 200 end
+    end
     local ok, res, err, status = requestWithRetry(url, customHeaders, nil, nil, shouldAbort)
     if not ok then
         return false, nil, err, status
@@ -843,6 +954,7 @@ local function fetchMidiBytesWithRetry(url, customHeaders, shouldAbort)
     if not body or not body:find("MThd", 1, true) then
         return false, nil, "Response is not a MIDI file (missing MThd)", status
     end
+    if not customHeaders then midiCache:put(url, body) end
     return true, body, nil, status
 end
 
@@ -861,6 +973,7 @@ local QuickState = {
     repoUrl = QUICKPICKS_REPO_URL,
     sourceLabel = "GitHub Repo",
     autoPlayOnSelect = false,
+    sortAlphabetically = false,
     suppressCallback = false,
     verifying = false,
     verifyAbort = false,
@@ -948,6 +1061,9 @@ recordHistory = function(title, source, replayFn)
     })
     while #HistoryState.entries > HistoryState.maxSize do
         table.remove(HistoryState.entries)
+    end
+    if HistoryState.onChanged then
+        pcall(HistoryState.onChanged)
     end
 end
 
@@ -1111,56 +1227,16 @@ local function searchMuseScore(query)
     end
 
     local html = getResponseBody(res) or ""
-    local decodedHtml = Core.decodeHtmlEntities(html)
-    local results = {}
-    local seenIds = {}
-
-    local function addResult(title, url)
-        if type(url) ~= "string" then return end
-        local cleanUrl = url:gsub("\\/", "/"):gsub("#.*$", ""):gsub("%?.*$", "")
-        if cleanUrl:sub(1, 1) == "/" then
-            cleanUrl = "https://musescore.com" .. cleanUrl
-        end
-        local scoreId = cleanUrl:match("/scores/(%d+)")
-        if not scoreId or seenIds[scoreId] then return end
-        seenIds[scoreId] = true
-        local cleanTitle = Core.stripHtmlTags(title)
-        if cleanTitle == "" then
-            cleanTitle = "Score #" .. scoreId
-        end
-        if #cleanTitle > 90 then
-            cleanTitle = cleanTitle:sub(1, 87) .. "..."
-        end
-        table.insert(results, {
-            title = cleanTitle,
-            url = cleanUrl,
-            id = scoreId,
-        })
+    if html:find("cf-browser-verification", 1, true) or html:find("challenge-platform", 1, true) or html:find("Just a moment", 1, true) then
+        return false, nil, "MuseScore returned a browser verification page instead of search results"
     end
-
-    -- JSON / data-content embedded store entries (decoded from &quot;)
-    for title, url in decodedHtml:gmatch('"title"%s*:%s*"([^"]-)"[^}]-"url"%s*:%s*"(https?://musescore%.com/[^"]-/scores/%d+[^"]*)"') do
-        addResult(title, url)
-        if #results >= 50 then break end
+    if type(Core.parseMuseScoreSearch) ~= "function" then
+        return false, nil, "MuseScore search requires the updated core.lua on q-29/piano main"
     end
-
-    if #results < 50 then
-        for url, title in decodedHtml:gmatch('"url"%s*:%s*"(https?://musescore%.com/[^"]-/scores/%d+[^"]*)"[^}]-"title"%s*:%s*"([^"]-)"') do
-            addResult(title, url)
-            if #results >= 50 then break end
-        end
+    local results = Core.parseMuseScoreSearch(html)
+    if #results == 0 then
+        return false, nil, "MuseScore returned no readable score links; the page format may have changed or access may be restricted"
     end
-
-    if #results < 50 then
-        for attrs, inner in html:gmatch('<a%s+([^>]-href=["\'][^"\']-/scores/%d+[^"\']*["\'][^>]*)>(.-)</a>') do
-            local url = attrs:match('href=["\']([^"\']-/scores/%d+[^"\']*)["\']')
-            local imgAlt = inner:match('alt=["\']([^"\']+)["\']')
-            local title = attrs:match('aria%-label=["\']([^"\']+)["\']') or attrs:match('title=["\']([^"\']+)["\']') or imgAlt or inner
-            addResult(title, url)
-            if #results >= 50 then break end
-        end
-    end
-
     return true, results, nil
 end
 
@@ -1338,43 +1414,44 @@ local function searchMidiShow(query)
         local ok, res, err, status = requestWithRetry(searchUrl, headers, 2, 0.75)
         if not ok then
             if status == 403 then
-                return false, nil, "MidiShow search blocked (HTTP 403 / Cloudflare; try setting Cookie)"
+                lastErr = "MidiShow denied the search request (HTTP 403)"
+            else
+                lastErr = "MidiShow search failed: " .. tostring(err)
             end
-            lastErr = "MidiShow search failed: " .. tostring(err)
         else
             local html = getResponseBody(res) or ""
             if html:find("cf-browser-verification", 1, true) or html:find("challenge-platform", 1, true) or html:find("Just a moment", 1, true) then
-                return false, nil, "MidiShow blocked by Cloudflare challenge (set Cookie)"
-            end
-
-            for attrs, inner in html:gmatch('<a%s+([^>]-href=["\'][^"\']-/midi/[^"\']+["\'][^>]*)>(.-)</a>') do
-                local rawHref = attrs:match('href=["\']([^"\']+)["\']')
-                if rawHref then
-                    local cleanHref = rawHref:gsub("#.*$", ""):gsub("%?.*$", "")
-                    local id = cleanHref:match("/(%d+)%.html") or cleanHref:match("-(%d+)/?$")
-                    if id and not seenIds[id] and not cleanHref:find("/midi/browse", 1, true) and not cleanHref:find("/midi/download", 1, true) then
-                        local heading = inner:match("<h[1-6][^>]*>(.-)</h[1-6]>") or inner:match("<strong[^>]*>(.-)</strong>")
-                        local rawTitle = heading or attrs:match('title=["\']([^"\']+)["\']') or inner
-                        local cleanTitle = Core.stripHtmlTags(rawTitle)
-                        if cleanTitle ~= "" and not cleanTitle:lower():match("^download") then
-                            if #cleanTitle > 90 then
-                                cleanTitle = cleanTitle:sub(1, 87) .. "..."
+                lastErr = "MidiShow returned a browser verification page"
+            else
+                for attrs, inner in html:gmatch('<a%s+([^>]-href=["\'][^"\']-/midi/[^"\']+["\'][^>]*)>(.-)</a>') do
+                    local rawHref = attrs:match('href=["\']([^"\']+)["\']')
+                    if rawHref then
+                        local cleanHref = rawHref:gsub("#.*$", ""):gsub("%?.*$", "")
+                        local id = cleanHref:match("/(%d+)%.html") or cleanHref:match("-(%d+)/?$")
+                        if id and not seenIds[id] and not cleanHref:find("/midi/browse", 1, true) and not cleanHref:find("/midi/download", 1, true) then
+                            local heading = inner:match("<h[1-6][^>]*>(.-)</h[1-6]>") or inner:match("<strong[^>]*>(.-)</strong>")
+                            local rawTitle = heading or attrs:match('title=["\']([^"\']+)["\']') or inner
+                            local cleanTitle = Core.stripHtmlTags(rawTitle)
+                            if cleanTitle ~= "" and not cleanTitle:lower():match("^download") then
+                                if #cleanTitle > 90 then
+                                    cleanTitle = cleanTitle:sub(1, 87) .. "..."
+                                end
+                                seenIds[id] = true
+                                local fullUrl = cleanHref:match("^https?://") and cleanHref or ("https://www.midishow.com" .. (cleanHref:sub(1, 1) == "/" and "" or "/") .. cleanHref)
+                                table.insert(results, {
+                                    title = cleanTitle,
+                                    url = fullUrl,
+                                    id = id,
+                                })
+                                if #results >= 50 then break end
                             end
-                            seenIds[id] = true
-                            local fullUrl = cleanHref:match("^https?://") and cleanHref or ("https://www.midishow.com" .. (cleanHref:sub(1, 1) == "/" and "" or "/") .. cleanHref)
-                            table.insert(results, {
-                                title = cleanTitle,
-                                url = fullUrl,
-                                id = id,
-                            })
-                            if #results >= 50 then break end
                         end
                     end
                 end
-            end
 
-            if #results > 0 then
-                return true, results, nil
+                if #results > 0 then
+                    return true, results, nil
+                end
             end
         end
     end
@@ -1509,7 +1586,15 @@ registerStopHook(function()
 end)
 
 local function applyQuickPickFilter()
-    local matches, totalMatches = Core.filterSongList(QuickState.order, QuickState.query, MAX_DROPDOWN_ITEMS)
+    local matches, totalMatches = Core.filterSongList(QuickState.order, QuickState.query)
+    if QuickState.sortAlphabetically then
+        table.sort(matches, function(a, b)
+            local lowerA, lowerB = a:lower(), b:lower()
+            if lowerA == lowerB then return a < b end
+            return lowerA < lowerB
+        end)
+    end
+    while #matches > MAX_DROPDOWN_ITEMS do table.remove(matches) end
     QuickState.filtered = matches
     QuickState.totalMatches = totalMatches
     QuickState.selected = setDropdownOptions(
@@ -1589,6 +1674,15 @@ QuickPickDropdown = QuickPicksBox:AddDropdown("QuickPickSelect", {
     end,
 })
 
+QuickPicksBox:AddToggle("QuickSortToggle", {
+    Text = "🔤 Sort Quick Picks A–Z",
+    Default = false,
+    Callback = function(value)
+        QuickState.sortAlphabetically = value
+        applyQuickPickFilter()
+    end,
+})
+
 QuickPicksBox:AddToggle("QuickAutoPlayToggle", {
     Text = "⚡ Auto-Play Song on Select",
     Default = false,
@@ -1603,6 +1697,30 @@ QuickPicksBox:AddButton({
         playQuickPickSelection(QuickState.selected)
     end,
 })
+
+-- Step through the currently displayed matches, wrapping at either end.
+do
+    local function playAdjacentQuickPick(direction)
+        local list = QuickState.filtered
+        if #list == 0 then
+            notify("Quick Picks", "No matching songs to play.", 2)
+            return
+        end
+        local current
+        for index, label in ipairs(list) do
+            if label == QuickState.selected then current = index; break end
+        end
+        local index = current and ((current - 1 + direction) % #list + 1) or 1
+        local label = list[index]
+        QuickState.suppressCallback = true
+        pcall(function() QuickPickDropdown:SetValue(label) end)
+        QuickState.suppressCallback = false
+        QuickState.selected = label
+        playQuickPickSelection(label)
+    end
+    QuickPicksBox:AddButton({ Text = "⏮️ Previous matching song", Func = function() playAdjacentQuickPick(-1) end })
+    QuickPicksBox:AddButton({ Text = "⏭️ Next matching song", Func = function() playAdjacentQuickPick(1) end })
+end
 
 QuickPicksBox:AddButton({
     Text = "⚡ Auto-Try Matching Quick Picks",
@@ -1633,7 +1751,7 @@ QuickPicksBox:AddButton({
                 if playbackId ~= myId then return end
                 if ok and midiBody then
                     local replayFn = function()
-                        playQuickPickSelection(entry.label)
+                        downloadAndPlayUrl(entry.url, "QuickPick", false, entry.label)
                     end
                     local played = parseAndPlayMidi(midiBody, myId, function()
                         QuickState.statusActive = true
@@ -1665,6 +1783,262 @@ QuickPicksBox:AddButton({
         applyQuickPickFilter()
     end,
 })
+
+-- Store only titles and URLs. Persistence is optional: executors without
+-- filesystem support can still use favorites for the current session.
+do
+    local favorites = {}
+    local favoritesFile = "universal_piano_favorites.json"
+    local persistenceAvailable = type(readfile) == "function" and type(writefile) == "function"
+    if type(readfile) == "function" then
+        local ok, raw = pcall(readfile, favoritesFile)
+        if ok and type(raw) == "string" then
+            local decoded, data = pcall(HttpService.JSONDecode, HttpService, raw)
+            if decoded and type(data) == "table" then
+                favorites = Core.sanitizeSongEntries(data, 500)
+            end
+        end
+    end
+    local function saveFavorites()
+        if not persistenceAvailable then return false end
+        local encoded, json = pcall(HttpService.JSONEncode, HttpService, favorites)
+        if not encoded then return false end
+        local ok = pcall(writefile, favoritesFile, json)
+        if not ok then persistenceAvailable = false end
+        return ok
+    end
+    local selectedUrl = nil
+    local favoriteDropdown
+    local suppressFavoriteCallback = false
+    local lastRandomUrl = nil
+    local favoritesBox = QuickTab:AddGroupbox({ Side = "Right", Name = "⭐ Favorites & Shuffle" })
+    local favoriteStatus = favoritesBox:AddLabel("FavoriteStatus", { Text = "Favorites: 0 (this session)" })
+    local favoriteByLabel = {}
+
+    local function refreshFavorites()
+        local labels = {}
+        favoriteByLabel = {}
+        for index, entry in ipairs(favorites) do
+            local label = string.format("%d. %s", index, entry.title)
+            labels[#labels + 1] = label
+            favoriteByLabel[label] = entry.url
+        end
+        local first = setDropdownOptions(favoriteDropdown, labels, "No favorites yet", function(value)
+            suppressFavoriteCallback = value
+        end)
+        selectedUrl = first and favoriteByLabel[first] or nil
+        setLabelSafe(favoriteStatus, string.format("Favorites: %d (%s)", #favorites, persistenceAvailable and "local file" or "session only"))
+    end
+
+    favoriteDropdown = favoritesBox:AddDropdown("FavoriteSelect", {
+        Text = "Favorite songs",
+        Values = {"No favorites yet"},
+        Default = "No favorites yet",
+        Multi = false,
+        Searchable = true,
+        MaxVisibleDropdownItems = 12,
+        Callback = function(option)
+            if suppressFavoriteCallback then return end
+            local chosen = type(option) == "table" and option[1] or option
+            selectedUrl = favoriteByLabel[chosen]
+        end,
+    })
+
+    refreshFavorites()
+
+    addFavoriteByUrl = function(title, url)
+        local validated = Core.sanitizeSongEntries({{title = title, url = url}}, 1)
+        if #validated == 0 then notify("Favorites", "Enter a valid public HTTP(S) URL and title.", 3); return end
+        local entry = validated[1]
+        for _, existing in ipairs(favorites) do
+            if existing.url == entry.url then notify("Favorites", "That song is already saved.", 2); return end
+        end
+        if #favorites >= 500 then notify("Favorites", "Favorites are limited to 500 entries.", 3); return end
+        favorites[#favorites + 1] = entry
+        local saved = saveFavorites()
+        refreshFavorites()
+        notify("Favorites", saved and ("Saved " .. entry.title .. ".") or "Saved for this session; local file unavailable or write failed.", 3)
+    end
+    favoritesBox:AddButton({
+        Text = "⭐ Save selected Quick Pick",
+        Func = function()
+            local title = QuickState.selected
+            local url = title and QuickState.map[title]
+            if not url then notify("Favorites", "Select a Quick Pick first.", 3); return end
+            addFavoriteByUrl(title, url)
+        end,
+    })
+
+    favoritesBox:AddButton({
+        Text = "▶️ Play favorite",
+        Func = function()
+            for _, entry in ipairs(favorites) do
+                if entry.url == selectedUrl then
+                    downloadAndPlayUrl(entry.url, "Favorite", false, entry.title)
+                    return
+                end
+            end
+            notify("Favorites", "Choose a favorite first.", 3)
+        end,
+    })
+
+    favoritesBox:AddButton({
+        Text = "🗑️ Remove selected favorite",
+        Func = function()
+            for index, entry in ipairs(favorites) do
+                if entry.url == selectedUrl then
+                    table.remove(favorites, index)
+                    local saved = saveFavorites()
+                    refreshFavorites()
+                    notify("Favorites", saved and ("Removed " .. entry.title .. ".") or "Removed for this session; local file unavailable or write failed.", 3)
+                    return
+                end
+            end
+            notify("Favorites", "Choose a favorite first.", 3)
+        end,
+    })
+
+    favoritesBox:AddButton({
+        Text = "🎲 Shuffle favorites",
+        Func = function()
+            if #favorites == 0 then
+                notify("Favorites", "Save a Quick Pick first.", 3)
+                return
+            end
+            local pool = {}
+            for _, entry in ipairs(favorites) do
+                if entry.url ~= lastRandomUrl then pool[#pool + 1] = entry end
+            end
+            if #pool == 0 then pool = favorites end
+            local entry = pool[math.random(1, #pool)]
+            lastRandomUrl = entry.url
+            downloadAndPlayUrl(entry.url, "Favorite Shuffle", false, entry.title)
+        end,
+    })
+
+    favoritesBox:AddButton({
+        Text = "🗑️ Clear favorites",
+        Func = function()
+            if #favorites == 0 then
+                notify("Favorites", "There are no favorites to clear.", 2)
+                return
+            end
+            favorites = {}
+            local saved = saveFavorites()
+            refreshFavorites()
+            notify("Favorites", saved and "Favorites cleared." or "Cleared for this session; local file unavailable or write failed.", 3)
+        end,
+    })
+
+    do
+        local playlistFile = "universal_piano_playlists.json"
+        local playlists, selectedPlaylist, requestedName = {}, nil, ""
+        local playlistDropdown, playlistSuppress = nil, false
+        local playlistBox = QuickTab:AddGroupbox({Side = "Right", Name = "📚 Custom Playlists"})
+        local playlistStatus = playlistBox:AddLabel("PlaylistStatus", {Text = "Playlists: 0"})
+        if type(readfile) == "function" then
+            local ok, raw = pcall(readfile, playlistFile)
+            if ok and type(raw) == "string" then
+                local decoded, data = pcall(HttpService.JSONDecode, HttpService, raw)
+                if decoded and type(data) == "table" then
+                    local count = 0
+                    for name, entries in pairs(data) do
+                        if count >= 30 then break end
+                        if type(name) == "string" and #name > 0 and #name <= 80 and not name:find("[%c]") then
+                            local valid = Core.sanitizeSongEntries(entries, 100)
+                            if #valid > 0 then playlists[name] = valid; count = count + 1 end
+                        end
+                    end
+                end
+            end
+        end
+        local function savePlaylists()
+            if type(writefile) ~= "function" then return false end
+            local ok, encoded = pcall(HttpService.JSONEncode, HttpService, playlists)
+            if not ok then return false end
+            return pcall(writefile, playlistFile, encoded)
+        end
+        local function refreshPlaylists(preferred)
+            local names = {}
+            for name in pairs(playlists) do names[#names + 1] = name end
+            table.sort(names)
+            local first = setDropdownOptions(playlistDropdown, names, "No playlists", function(v) playlistSuppress = v end)
+            selectedPlaylist = preferred and playlists[preferred] and preferred or first
+            if selectedPlaylist and selectedPlaylist ~= first then
+                playlistSuppress = true
+                pcall(function() playlistDropdown:SetValue(selectedPlaylist) end)
+                playlistSuppress = false
+            end
+            setLabelSafe(playlistStatus, string.format("Playlists: %d%s", #names, type(writefile) == "function" and "" or " (session only)"))
+        end
+        playlistDropdown = playlistBox:AddDropdown("PlaylistSelect", {
+            Text = "Saved playlist", Values = {"No playlists"}, Default = "No playlists", Multi = false,
+            Searchable = true, MaxVisibleDropdownItems = 12,
+            Callback = function(option)
+                if playlistSuppress then return end
+                local value = type(option) == "table" and option[1] or option
+                selectedPlaylist = playlists[value] and value or nil
+            end,
+        })
+        playlistBox:AddInput("PlaylistName", {
+            Text = "Playlist name", Default = "", Placeholder = "Name for the current favorites",
+            ClearTextOnFocus = false, Finished = true,
+            Callback = function(value) requestedName = tostring(value or ""):match("^%s*(.-)%s*$") end,
+        })
+        playlistBox:AddButton({Text = "💾 Save / overwrite from favorites", Func = function()
+            if requestedName == "" or #requestedName > 80 or requestedName:find("[%c]") then
+                notify("Playlists", "Enter a name up to 80 characters.", 3); return
+            end
+            local count = 0
+            for _ in pairs(playlists) do count = count + 1 end
+            if not playlists[requestedName] and count >= 30 then notify("Playlists", "Playlist limit is 30.", 3); return end
+            if #favorites > 100 then notify("Playlists", "A playlist may contain at most 100 favorites.", 3); return end
+            local entries = Core.sanitizeSongEntries(favorites, 100)
+            if #entries == 0 then notify("Playlists", "Add favorites before saving.", 3); return end
+            playlists[requestedName] = entries
+            local saved = savePlaylists()
+            refreshPlaylists(requestedName)
+            notify("Playlists", saved and "Playlist saved." or "Saved for this session; local file unavailable or write failed.", 3)
+        end})
+        playlistBox:AddButton({Text = "➕ Add playlist to queue", Func = function()
+            if not selectedPlaylist or not playlists[selectedPlaylist] then notify("Playlists", "Select a playlist first.", 2); return end
+            if not enqueuePlaylist then notify("Playlists", "Queue is not ready.", 2); return end
+            local added = enqueuePlaylist(playlists[selectedPlaylist])
+            notify("Playlists", string.format("Queued %d songs; use Play next in the queue to start.", added), 3)
+        end})
+        playlistBox:AddButton({Text = "🗑️ Delete selected playlist", Func = function()
+            if not selectedPlaylist then notify("Playlists", "Select a playlist first.", 2); return end
+            playlists[selectedPlaylist] = nil
+            local saved = savePlaylists()
+            refreshPlaylists()
+            notify("Playlists", saved and "Playlist deleted." or "Deleted for this session; local file unavailable or write failed.", 3)
+        end})
+        refreshPlaylists()
+    end
+
+    favoritesBox:AddButton({
+        Text = "🎲 Shuffle matching Quick Picks",
+        Func = function()
+            local matches, alternatives = {}, {}
+            for _, label in ipairs(QuickState.order) do
+                local url = QuickState.map[label]
+                if url and Core.matchesQuery(label, QuickState.query) then
+                    local entry = { title = label, url = url }
+                    matches[#matches + 1] = entry
+                    if url ~= lastRandomUrl then alternatives[#alternatives + 1] = entry end
+                end
+            end
+            if #matches == 0 then
+                notify("Shuffle", "No Quick Picks match the current search.", 3)
+                return
+            end
+            local pool = #alternatives > 0 and alternatives or matches
+            local entry = pool[math.random(1, #pool)]
+            lastRandomUrl = entry.url
+            downloadAndPlayUrl(entry.url, "QuickPick Shuffle", false, entry.title)
+        end,
+    })
+end
 
 -- ==========================================
 -- GitHub Repo Sync (Auto-Retry)
@@ -1793,64 +2167,80 @@ RepoBox:AddButton({
         local index = 0
         local done = 0
         local lastProgressLabel = 0
+        local workerCount = 2
+        local workersRemaining = workerCount
 
         notify("Verifying Links...", string.format("Testing %d links. Click the button again to cancel.", total), 3)
 
         -- Keep the request rate modest (at most two in flight) and leave a
         -- short gap between requests to reduce repository/API rate limiting.
-        for _ = 1, 2 do
+        for _ = 1, workerCount do
             task.spawn(function()
-                while true do
-                    if QuickState.verifyAbort then break end
-                    index = index + 1
-                    local i = index
-                    if i > total then break end
+                local workerOk, workerErr = pcall(function()
+                    while true do
+                        if QuickState.verifyAbort then break end
+                        index = index + 1
+                        local i = index
+                        if i > total then break end
 
-                    local item = snapshot[i]
-                    local ok, res, err = safeRequest(item.url)
-                    local status = ok and res and (res.StatusCode or res.status_code) or nil
-                    local body = getResponseBody(res)
-                    local isMidi = ok and res and status == 200 and body ~= nil and body:find("MThd", 1, true) ~= nil
+                        local item = snapshot[i]
+                        local ok, res, err = safeRequest(item.url)
+                        local status = ok and res and (res.StatusCode or res.status_code) or nil
+                        local body = getResponseBody(res)
+                        local isMidi = ok and res and status == 200 and body ~= nil and body:find("MThd", 1, true) ~= nil
 
-                    -- Respect explicit rate-limit / access-denied responses
-                    -- before the worker takes another URL from the queue.
-                    if status == 429 or status == 403 then
-                        task.wait(2)
-                    else
-                        task.wait(0.25)
+                        -- Respect explicit rate-limit / access-denied responses
+                        -- before the worker takes another URL from the queue.
+                        if status == 429 or status == 403 then
+                            task.wait(2)
+                        else
+                            task.wait(0.25)
+                        end
+
+                        if isMidi then
+                            passed = passed + 1
+                        else
+                            failedCount = failedCount + 1
+                            local reason = not ok and tostring(err) or ("HTTP " .. tostring(status) .. " / not MIDI")
+                            table.insert(QuickState.verifyFailures, string.format("%s (%s)", item.label, reason))
+                            warn(string.format("[Verify FAIL] %s | %s | %s", item.label, reason, item.url))
+                        end
+                        done = done + 1
+
+                        -- Live progress feedback (at most every 5 links).
+                        if done - lastProgressLabel >= 5 or done == total then
+                            lastProgressLabel = done
+                            setLabelSafe(QuickStatusLabel, string.format("Verifying links: %d/%d done", done, total))
+                        end
                     end
-
-                    if isMidi then
-                        passed = passed + 1
-                    else
-                        failedCount = failedCount + 1
-                        local reason = not ok and tostring(err) or ("HTTP " .. tostring(status) .. " / not MIDI")
-                        table.insert(QuickState.verifyFailures, string.format("%s (%s)", item.label, reason))
-                        warn(string.format("[Verify FAIL] %s | %s | %s", item.label, reason, item.url))
-                    end
-                    done = done + 1
-
-                    -- Live progress feedback (at most every 5 links).
-                    if done - lastProgressLabel >= 5 or done == total then
-                        lastProgressLabel = done
-                        setLabelSafe(QuickStatusLabel, string.format("Verifying links: %d/%d done", done, total))
-                    end
+                end)
+                if not workerOk then
+                    QuickState.verifyAbort = true
+                    table.insert(QuickState.verifyFailures, "Verifier error: " .. tostring(workerErr))
+                    warn("[QuickPicks Verify] Worker failed:", workerErr)
                 end
+                workersRemaining = workersRemaining - 1
             end)
         end
 
-        while done < total and not QuickState.verifyAbort do
+        -- Keep the run locked until in-flight requests return. Otherwise a
+        -- new run can reset the cancellation flag while old workers still run.
+        while workersRemaining > 0 do
+            if QuickState.verifyAbort then
+                setLabelSafe(QuickStatusLabel, "Cancelling verification; waiting for active requests...")
+            end
             task.wait(0.1)
         end
 
         QuickState.verifying = false
-        local summary = string.format("Passed: %d / %d | Failed: %d", passed, total, failedCount)
+        local summary = string.format("Checked: %d / %d | Passed: %d | Failed: %d", done, total, passed, failedCount)
+        setLabelSafe(QuickVerifyLabel, summary .. (QuickState.verifyAbort and " (cancelled)" or ""))
         if #QuickState.verifyFailures > 0 then
             local shown = table.concat(QuickState.verifyFailures, "\n")
             if #shown > 1500 then shown = shown:sub(1, 1500) .. " ..." end
-            setLabelSafe(QuickVerifyLabel, summary .. "\n\nFailed:\n" .. shown)
+            setLabelSafe(QuickVerifyLabel, summary .. (QuickState.verifyAbort and " (cancelled)" or "") .. "\n\nFailed:\n" .. shown)
         end
-        setLabelSafe(QuickStatusLabel, "Link verification finished.")
+        setLabelSafe(QuickStatusLabel, QuickState.verifyAbort and "Link verification cancelled." or "Link verification finished.")
         print(string.format("[QuickPicks Verify] %s", summary))
         notify("Link Verification Done", summary .. (QuickState.verifyAbort and " (cancelled)" or ""), 5)
     end,
@@ -1980,6 +2370,15 @@ DirectBox:AddButton({
     end,
 })
 
+DirectBox:AddButton({
+    Text = "⭐ Save URL as favorite",
+    Func = function()
+        local url = normalizeMidiUrl(customMidiUrl)
+        if not url:match("^https?://") then notify("Favorites", "Enter a valid URL first.", 3); return end
+        addFavoriteByUrl(Core.deriveTitleFromUrl(url), url)
+    end,
+})
+
 -- ==========================================
 -- Playback Controls
 -- ==========================================
@@ -2008,9 +2407,116 @@ PlaybackBox:AddSlider("QuickPlaybackSpeed", {
     end,
 })
 
+PlaybackBox:AddToggle("FallingNotesToggle", {
+    Text = "🎼 Show falling-note preview above HUD",
+    Default = false,
+    Callback = function(value) PlayerHudState.visualizerEnabled = value end,
+})
+
+PlaybackBox:AddToggle("PracticeModeToggle", {
+    Text = "🎹 Practice: wait for the next note or chord",
+    Default = false,
+    Tooltip = "Play each displayed key yourself. Playback waits for every key in a chord.",
+    Callback = function(value)
+        PlayerHudState.practiceMode = value
+        PlayerHudState.waitingForNotes = nil
+    end,
+})
+
+PlaybackBox:AddToggle("LoopSongToggle", {
+    Text = "🔁 Loop current song",
+    Default = false,
+    Callback = function(Value)
+        PlayerHudState.loopSong = Value
+    end,
+})
+
+local function setPracticeLoopPoint(point)
+    if not playing or PlayerHudState.totalTime <= 0 then
+        notify("A–B repeat", "Start a song before setting loop points.", 3)
+        return
+    end
+    local time = PlayerHudState.seekTarget or PlayerHudState.currentTime
+    if point == "A" then
+        PlayerHudState.loopA = time
+        PlayerHudState.loopB = nil
+        notify("A–B repeat", "Point A set at " .. formatDuration(time) .. ". Set point B next.", 3)
+    elseif Core.isValidLoopRange(PlayerHudState.loopA, time, PlayerHudState.totalTime) then
+        PlayerHudState.loopB = time
+        notify("A–B repeat", "Repeating " .. formatDuration(PlayerHudState.loopA) .. "–" .. formatDuration(time) .. ".", 3)
+    else
+        notify("A–B repeat", "Set A first, then set B at least 0.1 seconds later.", 3)
+    end
+end
+
+PlaybackBox:AddButton({ Text = "🅰️ Set loop point A", Func = function() setPracticeLoopPoint("A") end })
+PlaybackBox:AddButton({ Text = "🅱️ Set loop point B", Func = function() setPracticeLoopPoint("B") end })
+PlaybackBox:AddButton({
+    Text = "✖ Clear A–B repeat",
+    Func = function()
+        PlayerHudState.loopA, PlayerHudState.loopB = nil, nil
+        notify("A–B repeat", "Practice loop cleared.", 2)
+    end,
+})
+
+PlaybackBox:AddButton({
+    Text = "⏮️ Restart current song",
+    Func = function()
+        if not requestSeek(0) then
+            notify("Playback", "Start a song before seeking.", 2)
+        end
+    end,
+})
+
+PlaybackBox:AddButton({
+    Text = "⏪ Back 10 seconds",
+    Func = function()
+        if not seekRelative(-10) then notify("Playback", "Start a song before seeking.", 2) end
+    end,
+})
+
+PlaybackBox:AddButton({
+    Text = "⏩ Forward 10 seconds",
+    Func = function()
+        if not seekRelative(10) then notify("Playback", "Start a song before seeking.", 2) end
+    end,
+})
+
+local seekPercentInput = ""
+PlaybackBox:AddInput("SeekPercent", {
+    Text = "Seek to percentage",
+    Default = "",
+    Placeholder = "0 to 100, then press Enter",
+    ClearTextOnFocus = false,
+    Finished = true,
+    Callback = function(text)
+        seekPercentInput = tostring(text or "")
+    end,
+})
+PlaybackBox:AddButton({
+    Text = "📍 Seek to percentage",
+    Func = function()
+        local percent = tonumber(seekPercentInput)
+        if not percent or percent ~= percent or percent < 0 or percent > 100 then
+            notify("Playback", "Enter a percentage between 0 and 100.", 3)
+        elseif not requestSeek(PlayerHudState.totalTime * percent / 100) then
+            notify("Playback", "Start a song before seeking.", 2)
+        end
+    end,
+})
+
 PlaybackBox:AddButton({
     Text = "⏯️ Pause / Resume",
     Func = togglePausePlayback,
+})
+
+PlaybackBox:AddButton({
+    Text = "🧹 Clear session MIDI cache",
+    Func = function()
+        local count = midiCache:stats()
+        midiCache:clear()
+        notify("MIDI cache", string.format("Cleared %d cached files.", count), 2)
+    end,
 })
 
 PlaybackBox:AddButton({
@@ -2021,6 +2527,31 @@ PlaybackBox:AddButton({
 -- ==========================================
 -- Velocity, Layout & Articulation (items 1, 2, 5, 6)
 -- ==========================================
+PlaybackBox:AddToggle("FoldMidiNotes", {
+    Text = "🎼 Fold out-of-range MIDI notes by octave",
+    Default = false,
+    Callback = function(value)
+        midiMapping.fold = value
+        midiMapping.version = midiMapping.version + 1
+    end,
+})
+PlaybackBox:AddSlider("TransposeSemitones", {
+    Text = "Transpose (semitones)", Default = 0, Min = -12, Max = 12, Rounding = 0,
+    Callback = function(value)
+        midiMapping.transpose = math.floor(tonumber(value) or 0)
+        midiMapping.version = midiMapping.version + 1
+    end,
+})
+local octaveStatus = PlaybackBox:AddLabel("OctaveShiftStatus", { Text = "Octave shift: 0" })
+local function shiftOctave(amount)
+    midiMapping.octave = math.clamp(midiMapping.octave + amount, -2, 2)
+    midiMapping.version = midiMapping.version + 1
+    setLabelSafe(octaveStatus, string.format("Octave shift: %+d", midiMapping.octave))
+end
+PlaybackBox:AddButton({ Text = "🔽 Octave down", Func = function() shiftOctave(-1) end })
+PlaybackBox:AddButton({ Text = "🔼 Octave up", Func = function() shiftOctave(1) end })
+PlaybackBox:AddButton({ Text = "↔️ Reset octave shift", Func = function() shiftOctave(-midiMapping.octave) end })
+
 PlaybackBox:AddSlider("VelocityMin", {
     Text = "Fallback Hold Min",
     Tooltip = "The virtual keyboard can't send velocity, so the velocity sliders control how long a note rings if the file has no note-off (fallback hold).",
@@ -2111,6 +2642,88 @@ PlaybackBox:AddSlider("CompactStartNote", {
     end,
 })
 
+-- Track metadata comes from the currently loaded MIDI. Track selection is
+-- explicit: there is no reliable universal "melody" or "accompaniment" ID.
+do
+    local trackBox = QuickTab:AddGroupbox({Side = "Right", Name = "🎛️ MIDI Tracks & Channels"})
+    local trackDropdown, trackByLabel, selectedTrack, suppress = nil, {}, nil, false
+    local trackStatus = trackBox:AddLabel("MidiTrackStatus", {Text = "Load a MIDI song to choose tracks."})
+    local function status()
+        if not selectedTrack then
+            setLabelSafe(trackStatus, "Load a MIDI song to choose tracks.")
+            return
+        end
+        local muted = midiMapping.mutedTracks[selectedTrack] and "muted" or "enabled"
+        local solo = midiMapping.soloTrack and (" | solo: track " .. midiMapping.soloTrack) or " | no solo"
+        setLabelSafe(trackStatus, "Track " .. selectedTrack .. ": " .. muted .. solo)
+    end
+    trackDropdown = trackBox:AddDropdown("MidiTrackSelect", {
+        Text = "Track", Values = {"Load a MIDI first"}, Default = "Load a MIDI first",
+        Multi = false, Searchable = true, MaxVisibleDropdownItems = 12,
+        Callback = function(option)
+            if suppress then return end
+            selectedTrack = trackByLabel[type(option) == "table" and option[1] or option]
+            status()
+        end,
+    })
+    updateMidiTrackControls = function(tracks)
+        local labels = {}
+        trackByLabel = {}
+        for _, track in ipairs(tracks or {}) do
+            local name = tostring(track.name or ""):gsub("[%c]", " "):sub(1, 60)
+            local instrument = tostring(track.instrument or ""):gsub("[%c]", " "):sub(1, 40)
+            local label = string.format("%d. %s%s", track.index, name ~= "" and name or "Unnamed track", instrument ~= "" and (" (" .. instrument .. ")") or "")
+            labels[#labels + 1] = label
+            trackByLabel[label] = track.index
+        end
+        local first = setDropdownOptions(trackDropdown, labels, "No tracks found", function(value) suppress = value end)
+        selectedTrack = first and trackByLabel[first] or nil
+        status()
+    end
+    trackBox:AddButton({Text = "🔇 Toggle selected track mute", Func = function()
+        if not selectedTrack then notify("MIDI tracks", "Load a MIDI and select a track first.", 2); return end
+        midiMapping.mutedTracks[selectedTrack] = not midiMapping.mutedTracks[selectedTrack]
+        midiMapping.version = midiMapping.version + 1
+        status()
+    end})
+    trackBox:AddButton({Text = "🎯 Toggle solo selected track", Func = function()
+        if not selectedTrack then notify("MIDI tracks", "Load a MIDI and select a track first.", 2); return end
+        if midiMapping.soloTrack == selectedTrack then
+            midiMapping.soloTrack = nil
+        else
+            midiMapping.soloTrack = selectedTrack
+        end
+        midiMapping.version = midiMapping.version + 1
+        status()
+    end})
+    trackBox:AddButton({Text = "🔊 Clear track mutes and solo", Func = function()
+        midiMapping.mutedTracks, midiMapping.soloTrack = {}, nil
+        midiMapping.version = midiMapping.version + 1
+        status()
+    end})
+    for channelNumber = 1, 16 do
+        local channel = channelNumber
+        trackBox:AddToggle("MuteMidiChannel" .. channel, {
+            Text = "Mute channel " .. channel .. (channel == 10 and " (drums)" or ""),
+            Default = channel == 10,
+            Callback = function(value)
+                midiMapping.mutedChannels[channel] = value
+                midiMapping.version = midiMapping.version + 1
+            end,
+        })
+    end
+    local humanBox = QuickTab:AddGroupbox({Side = "Right", Name = "🎲 Humanize MIDI"})
+    humanBox:AddLabel("HumanizeHint", {Text = "Applied when a MIDI is loaded or replayed."})
+    humanBox:AddSlider("HumanizeJitter", {
+        Text = "Timing jitter", Default = 0, Min = 0, Max = 30, Rounding = 0, Suffix = " ms",
+        Callback = function(value) midiMapping.jitterMs = value end,
+    })
+    humanBox:AddSlider("HumanizeRoll", {
+        Text = "Chord roll per note", Default = 0, Min = 0, Max = 30, Rounding = 0, Suffix = " ms",
+        Callback = function(value) midiMapping.rollMs = value end,
+    })
+end
+
 -- ==========================================
 -- Playback History (item 8)
 -- ==========================================
@@ -2123,38 +2736,27 @@ local HistoryDropdown -- forward declared
 local HistoryStatusLabel = HistoryBox:AddLabel("HistoryStatusLabel", {
     Text = "History: No songs played yet",
 })
+local historyByLabel = {}
+local selectedHistoryEntry = nil
 
 local function refreshHistoryDropdown()
-    local entries = HistoryState.entries
     local labels = {}
-    for _, entry in ipairs(entries) do
-        table.insert(labels, string.format("%s [%s]", entry.title, entry.source))
+    historyByLabel = {}
+    for index, entry in ipairs(HistoryState.entries) do
+        local label = string.format("%d. %s [%s]", index, entry.title, entry.source)
+        labels[#labels + 1] = label
+        historyByLabel[label] = entry
     end
-
+    local first = setDropdownOptions(HistoryDropdown, labels, "No history yet", function(v)
+        HistoryState.suppressCallback = v
+    end)
+    selectedHistoryEntry = first and historyByLabel[first] or nil
     if #labels == 0 then
-        setDropdownOptions(
-            HistoryDropdown,
-            {},
-            "No history yet",
-            function(v) HistoryState.suppressCallback = v end
-        )
         setLabelSafe(HistoryStatusLabel, "History: No songs played yet")
-        return
+    else
+        setLabelSafe(HistoryStatusLabel, string.format("History: %d entries (newest first)", #labels))
     end
-
-    setDropdownOptions(
-        HistoryDropdown,
-        labels,
-        labels[1],
-        function(v) HistoryState.suppressCallback = v end
-    )
-    setLabelSafe(HistoryStatusLabel, string.format("History: %d entries (newest first)", #entries))
 end
-
--- Keep history dropdown in sync when playback stops.
-registerStopHook(function()
-    refreshHistoryDropdown()
-end)
 
 HistoryDropdown = HistoryBox:AddDropdown("HistorySelect", {
     Text = "Select a past song",
@@ -2163,44 +2765,50 @@ HistoryDropdown = HistoryBox:AddDropdown("HistorySelect", {
     Multi = false,
     Searchable = true,
     MaxVisibleDropdownItems = 12,
-    Callback = function(Option)
-        local chosen = type(Option) == "table" and Option[1] or Option
-        local index = nil
-        for i, entry in ipairs(HistoryState.entries) do
-            if string.format("%s [%s]", entry.title, entry.source) == chosen then
-                index = i
-                break
-            end
+    Callback = function(option)
+        if HistoryState.suppressCallback then return end
+        local chosen = type(option) == "table" and option[1] or option
+        selectedHistoryEntry = historyByLabel[chosen]
+    end,
+})
+HistoryState.onChanged = refreshHistoryDropdown
+
+HistoryBox:AddButton({
+    Text = "🔄 Replay Selected",
+    Func = function()
+        local entry = selectedHistoryEntry
+        if not entry or not entry.replayFn then
+            notify("History", "Pick a replayable song from the history list first.", 3)
+            return
         end
-        if index and not HistoryState.suppressCallback then
-            local entry = HistoryState.entries[index]
-            if entry and entry.replayFn then
-                stopPlayback()
-                entry.replayFn()
-            else
-                notify("History", "No replayable entry for this song.", 3)
-            end
+        entry.replayFn()
+    end,
+})
+
+HistoryBox:AddButton({
+    Text = "⏮️ Replay latest",
+    Func = function()
+        local entry = HistoryState.entries[1]
+        if entry and entry.replayFn then
+            entry.replayFn()
+        else
+            notify("History", "There is no song to replay yet.", 2)
         end
     end,
 })
 
 HistoryBox:AddButton({
-    Text = "🔄 Replay Selected",
+    Text = "➖ Remove selected entry",
     Func = function()
-        local chosen = HistoryDropdown and HistoryDropdown.Value
-        if not chosen or chosen == "No history yet" then
-            notify("History", "Pick a song from the history list first.", 3)
-            return
-        end
-        for _, entry in ipairs(HistoryState.entries) do
-            if string.format("%s [%s]", entry.title, entry.source) == chosen then
-                if entry.replayFn then
-                    stopPlayback()
-                    entry.replayFn()
-                end
+        for index, entry in ipairs(HistoryState.entries) do
+            if entry == selectedHistoryEntry then
+                table.remove(HistoryState.entries, index)
+                refreshHistoryDropdown()
+                notify("History", "Entry removed.", 2)
                 return
             end
         end
+        notify("History", "Select an entry first.", 2)
     end,
 })
 
@@ -2255,9 +2863,13 @@ local function scanLocalMidiFiles()
         end
     end
 
-    if isfolder and pcall(isfolder, "midis") and isfolder("midis") then
-        tryScan("midis")
+    if type(makefolder) == "function" then
+        pcall(makefolder, "UniversalPiano")
+        pcall(makefolder, "UniversalPiano/midis")
+        pcall(makefolder, "UniversalPiano/sheets")
     end
+    tryScan("midis")
+    tryScan("UniversalPiano/midis")
     tryScan("")
 
     table.sort(LocalState.order)
@@ -2437,7 +3049,7 @@ local function playUploadedMidi()
     stopPlayback()
     local myId = playbackId
     task.spawn(function()
-        parseAndPlayMidi(midiData, myId, nil, {title = "Uploaded MIDI", subtitle = "Upload"}, nil)
+        parseAndPlayMidi(midiData, myId, nil, {title = "Uploaded MIDI", subtitle = "Upload"}, playUploadedMidi)
     end)
 end
 
@@ -2502,6 +3114,88 @@ SheetBox:AddSlider("SheetBPM", {
     end,
 })
 
+-- Local text sheets are read on demand; history retains only the path.
+do
+    local files, labels, selected, dropdown = {}, {}, nil, nil
+    local suppress = false
+    local status = SheetBox:AddLabel("LocalSheetStatus", { Text = "Local sheets: scanning..." })
+    local function refreshSheets()
+        files, labels = {}, {}
+        if type(listfiles) == "function" then
+            local ok, paths = pcall(listfiles, "UniversalPiano/sheets")
+            if ok and type(paths) == "table" then
+                for _, path in ipairs(paths) do
+                    if type(path) == "string" and path:lower():match("%.txt$") then
+                        local label = path:match("([^/\\]+)$") or path
+                        if not files[label] then files[label] = path; labels[#labels + 1] = label end
+                    end
+                end
+                table.sort(labels)
+            end
+        end
+        local first = setDropdownOptions(dropdown, labels, "No local sheets", function(value) suppress = value end)
+        selected = first and files[first] or nil
+        setLabelSafe(status, string.format("Local sheets: %d in UniversalPiano/sheets", #labels))
+    end
+    local function playLocalSheet(path)
+        if not path or type(readfile) ~= "function" then
+            notify("Local sheets", "Select a file and ensure readfile is available.", 3)
+            return
+        end
+        local ok, sheet = pcall(readfile, path)
+        if not ok or type(sheet) ~= "string" or #sheet == 0 or #sheet > 1024 * 1024 then
+            notify("Local sheets", "Could not read a nonempty sheet under 1 MB.", 3)
+            return
+        end
+        stopPlayback()
+        local id = playbackId
+        local title = path:match("([^/\\]+)$") or path
+        local function replay() playLocalSheet(path) end
+        task.spawn(playTextSheet, sheet, sheetBpm, id, {title = title, subtitle = "Local sheet"}, replay)
+    end
+    dropdown = SheetBox:AddDropdown("LocalSheetSelect", {
+        Text = "Local folder sheets", Values = {"No local sheets"}, Default = "No local sheets",
+        Multi = false, Searchable = true, MaxVisibleDropdownItems = 12,
+        Callback = function(option)
+            if not suppress then selected = files[type(option) == "table" and option[1] or option] end
+        end,
+    })
+    SheetBox:AddButton({Text = "🔄 Refresh local sheets", Func = refreshSheets})
+    SheetBox:AddButton({Text = "▶️ Play local sheet", Func = function() playLocalSheet(selected) end})
+    refreshSheets()
+end
+
+local function exportCurrentMidiSheet(destination)
+    if not currentMidiEvents then
+        notify("Sheet export", "Play a MIDI song first.", 3)
+        return
+    end
+    local sheet, err = Core.eventsToTextSheet(currentMidiEvents, sheetBpm)
+    if not sheet then
+        notify("Sheet export", tostring(err), 3)
+        return
+    end
+    local action = destination == "clipboard" and setclipboard or writefile
+    if type(action) ~= "function" then
+        notify("Sheet export", destination .. " is not supported by this executor.", 3)
+        return
+    end
+    local ok, result
+    if destination == "clipboard" then
+        ok, result = pcall(action, sheet)
+    else
+        ok, result = pcall(action, "universal_piano_export.txt", sheet)
+    end
+    if ok then
+        notify("Sheet export", destination == "clipboard" and "Copied text sheet." or "Saved universal_piano_export.txt.", 3)
+    else
+        notify("Sheet export failed", tostring(result), 4)
+    end
+end
+SheetBox:AddLabel("ExportHint", { Text = "Export uses the BPM above; note lengths, sustain and tempo changes are approximated." })
+SheetBox:AddButton({ Text = "📋 Copy current MIDI as text sheet", Func = function() exportCurrentMidiSheet("clipboard") end })
+SheetBox:AddButton({ Text = "💾 Save current MIDI text sheet", Func = function() exportCurrentMidiSheet("file") end })
+
 SheetBox:AddButton({
     Text = "▶️ Play Pasted Sheet",
     Func = function()
@@ -2512,8 +3206,8 @@ SheetBox:AddButton({
         stopPlayback()
         local myId = playbackId
         local title = "Text Sheet (" .. tostring(sheetBpm) .. " BPM)"
-        local replayFn
-        replayFn = function()
+        local function replayFn()
+
             stopPlayback()
             local newId = playbackId
             task.spawn(playTextSheet, pastedSheet, sheetBpm, newId, {
@@ -3521,6 +4215,217 @@ local function globalPlayEntry(entry)
     end)
 end
 
+-- Queue items keep only source descriptors; no MIDI bytes or executor
+-- objects are persisted. Delayed autoplay is invalidated by stop/new playback.
+do
+    local queue, selected, suppress = {}, nil, false
+    local autoplay, delaySeconds = false, 1
+    local box = GlobalTab:AddGroupbox({Side = "Right", Name = "📃 Playback Queue"})
+    local status = box:AddLabel("QueueStatus", {Text = "Queue: empty"})
+    local dropdown
+    local function refreshQueue(preferred)
+        local labels = {}
+        for index, item in ipairs(queue) do labels[index] = index .. ". " .. item.title end
+        local first = setDropdownOptions(dropdown, labels, "Queue is empty", function(v) suppress = v end)
+        selected = first and math.clamp(preferred or 1, 1, #queue) or nil
+        if selected and selected ~= 1 then
+            suppress = true
+            pcall(function() dropdown:SetValue(labels[selected]) end)
+            suppress = false
+        end
+        setLabelSafe(status, string.format("Queue: %d songs | autoplay %s", #queue, autoplay and "on" or "off"))
+    end
+    dropdown = box:AddDropdown("QueueSelect", {
+        Text = "Queued songs", Values = {"Queue is empty"}, Default = "Queue is empty",
+        Multi = false, Searchable = true, MaxVisibleDropdownItems = 12,
+        Callback = function(option)
+            if suppress then return end
+            local label = type(option) == "table" and option[1] or option
+            selected = tonumber(tostring(label or ""):match("^(%d+)%. "))
+            if not selected or not queue[selected] then selected = nil end
+        end,
+    })
+    local function add(title, action)
+        if #queue >= 100 then notify("Queue", "The queue is limited to 100 songs.", 3); return end
+        queue[#queue + 1] = {title = tostring(title or "Untitled"), play = action}
+        refreshQueue()
+        notify("Queue", "Added " .. tostring(title) .. ".", 2)
+    end
+    local function playNext()
+        if #queue == 0 then notify("Queue", "The queue is empty.", 2); return end
+        local item = table.remove(queue, 1)
+        refreshQueue()
+        local ok, err = pcall(item.play)
+        if not ok then notify("Queue", "Could not start song: " .. tostring(err), 4) end
+    end
+    enqueueRequestedSong = function(title, url)
+        add(title, function() downloadAndPlayUrl(url, "Song Request", false, title) end)
+    end
+    enqueuePlaylist = function(entries)
+        local added = 0
+        for _, item in ipairs(Core.sanitizeSongEntries(entries, 100)) do
+            if #queue >= 100 then break end
+            local title, url = item.title, item.url
+            queue[#queue + 1] = {title = title, play = function() downloadAndPlayUrl(url, "Playlist", false, title) end}
+            added = added + 1
+        end
+        refreshQueue()
+        return added
+    end
+    onPlaybackFinished = function(finishedId)
+        if not autoplay or #queue == 0 then return end
+        task.delay(delaySeconds, function()
+            if playbackId == finishedId and not playing and autoplay and #queue > 0 then
+                playNext()
+            end
+        end)
+    end
+    box:AddToggle("QueueAutoplay", {
+        Text = "Autoplay next", Default = false,
+        Callback = function(value) autoplay = value; refreshQueue() end,
+    })
+    box:AddSlider("QueueDelay", {
+        Text = "Delay between songs", Default = 1, Min = 0, Max = 30, Rounding = 1, Suffix = " s",
+        Callback = function(value) delaySeconds = value end,
+    })
+    box:AddButton({Text = "➕ Queue selected Quick Pick", Func = function()
+        local title = QuickState.selected
+        local url = title and QuickState.map[title]
+        if not url then notify("Queue", "Select a Quick Pick first.", 2); return end
+        add(title, function() downloadAndPlayUrl(url, "Queue", false, title) end)
+    end})
+    box:AddButton({Text = "➕ Queue selected search result", Func = function()
+        local entry = GlobalState.selected and GlobalState.resultsMap[GlobalState.selected]
+        if not entry then notify("Queue", "Select a search result first.", 2); return end
+        local saved = {kind = entry.kind, label = entry.label, path = entry.path, url = entry.url, source = entry.source, display = entry.display}
+        add(saved.label or saved.display, function() globalPlayEntry(saved) end)
+    end})
+    box:AddButton({Text = "➕ Queue direct URL", Func = function()
+        local url = normalizeMidiUrl(customMidiUrl)
+        if not url:match("^https?://") then notify("Queue", "Enter a valid direct URL first.", 2); return end
+        local title = Core.deriveTitleFromUrl(url)
+        add(title, function() downloadAndPlayUrl(url, "Queue URL", false, title) end)
+    end})
+    box:AddButton({Text = "▶️ Play next queued song", Func = playNext})
+    box:AddButton({Text = "⬆️ Move selected up", Func = function()
+        if selected and selected > 1 then
+            local newIndex = selected - 1
+            queue[selected], queue[newIndex] = queue[newIndex], queue[selected]
+            refreshQueue(newIndex)
+        end
+    end})
+    box:AddButton({Text = "⬇️ Move selected down", Func = function()
+        if selected and selected < #queue then
+            local newIndex = selected + 1
+            queue[selected], queue[newIndex] = queue[newIndex], queue[selected]
+            refreshQueue(newIndex)
+        end
+    end})
+    box:AddButton({Text = "➖ Remove selected", Func = function()
+        if selected and queue[selected] then table.remove(queue, selected); refreshQueue() end
+    end})
+    box:AddButton({Text = "🗑️ Clear queue", Func = function() queue = {}; refreshQueue() end})
+    refreshQueue()
+end
+
+-- Chat requests are opt-in. "Host" means the executor's LocalPlayer, not
+-- the Roblox server owner. Others are permitted only by explicit user ID.
+do
+    local box = GlobalTab:AddGroupbox({Side = "Right", Name = "💬 Song Requests"})
+    local status = box:AddLabel("ChatRequestStatus", {Text = "Requests off (local player only)."})
+    local enabled, allowWhitelist, whitelist = false, false, {}
+    local connections, lastRequest = {}, {}
+    local function disconnectAll()
+        for _, connection in ipairs(connections) do pcall(function() connection:Disconnect() end) end
+        connections, lastRequest = {}, {}
+    end
+    local function handleMessage(userId, message)
+        if not enabled or type(userId) ~= "number" then return end
+        local localPlayer = Players.LocalPlayer
+        local localId = localPlayer and localPlayer.UserId
+        if userId ~= localId and not (allowWhitelist and whitelist[tostring(userId)]) then return end
+        local command, query = Core.parseSongRequest(message)
+        if not command then return end
+        local now = tick()
+        if lastRequest[userId] and now - lastRequest[userId] < 5 then return end
+        lastRequest[userId] = now
+        for _, title in ipairs(QuickState.order) do
+            local url = QuickState.map[title]
+            if url and Core.matchesQuery(title, query) then
+                if command == "request" then
+                    if enqueueRequestedSong then enqueueRequestedSong(title, url) end
+                else
+                    downloadAndPlayUrl(url, "Chat request", false, title)
+                end
+                return
+            end
+        end
+        notify("Song request", "No Quick Pick matched: " .. query, 3)
+    end
+    local function listen()
+        disconnectAll()
+        local modern = false
+        local ok, chat = pcall(game.GetService, game, "TextChatService")
+        if ok and chat then
+            local versionOk, version = pcall(function() return chat.ChatVersion end)
+            if versionOk and version == Enum.ChatVersion.TextChatService then
+                local connected, connection = pcall(function()
+                    return chat.MessageReceived:Connect(function(message)
+                        local source = message.TextSource
+                        if source then handleMessage(source.UserId, message.Text) end
+                    end)
+                end)
+                if connected and connection then
+                    connections[#connections + 1] = connection
+                    modern = true
+                end
+            end
+        end
+        if not modern then
+            local function attach(player)
+                local connected, connection = pcall(function()
+                    return player.Chatted:Connect(function(message) handleMessage(player.UserId, message) end)
+                end)
+                if connected and connection then connections[#connections + 1] = connection end
+            end
+            local gotPlayers, players = pcall(Players.GetPlayers, Players)
+            if gotPlayers then for _, player in ipairs(players) do attach(player) end end
+            local connected, connection = pcall(function() return Players.PlayerAdded:Connect(attach) end)
+            if connected and connection then connections[#connections + 1] = connection end
+        end
+        setLabelSafe(status, #connections > 0 and "Requests on: !play or !request (Quick Picks only)." or "Requests unavailable in this client.")
+    end
+    box:AddInput("ChatWhitelist", {
+        Text = "Allowed Roblox user IDs", Default = "", Placeholder = "Comma-separated numeric IDs",
+        ClearTextOnFocus = false, Finished = true,
+        Callback = function(value) whitelist = Core.parseUserIdSet(value) end,
+    })
+    box:AddToggle("ChatAllowWhitelist", {
+        Text = "Allow listed users (otherwise local player only)", Default = false,
+        Callback = function(value) allowWhitelist = value end,
+    })
+    box:AddToggle("ChatRequestsEnabled", {
+        Text = "Enable chat requests", Default = false,
+        Callback = function(value)
+            enabled = value
+            if enabled then listen() else disconnectAll(); setLabelSafe(status, "Requests off (local player only).") end
+        end,
+    })
+    box:AddLabel("ChatRequestHint", {Text = "!play starts a match; !request adds it to the queue. Five-second per-user cooldown."})
+end
+
+GlobalBox:AddButton({
+    Text = "⭐ Save selected search result",
+    Func = function()
+        local entry = GlobalState.selected and GlobalState.resultsMap[GlobalState.selected]
+        if not entry or not entry.url then
+            notify("Favorites", "Select a URL-based search result first; local files cannot be saved as URL favorites.", 3)
+            return
+        end
+        addFavoriteByUrl(entry.label or entry.display, entry.url)
+    end,
+})
+
 GlobalBox:AddButton({
     Text = "▶️ Play Selected Match",
     Func = function()
@@ -3666,6 +4571,40 @@ local function createOnscreenPlayerHud()
     hudFrame.BorderSizePixel = 0
     hudFrame.Active = true
     hudFrame.Parent = screenGui
+
+    local noteOverlay = Instance.new("Frame")
+    noteOverlay.Name = "FallingNotes"
+    noteOverlay.Size = UDim2.new(1, 0, 0, 88)
+    noteOverlay.Position = UDim2.new(0, 0, 0, -94)
+    noteOverlay.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+    noteOverlay.BackgroundTransparency = 0.12
+    noteOverlay.BorderSizePixel = 0
+    noteOverlay.Visible = false
+    noteOverlay.ClipsDescendants = true
+    noteOverlay.Parent = hudFrame
+    local overlayCorner = Instance.new("UICorner")
+    overlayCorner.CornerRadius = UDim.new(0, 8)
+    overlayCorner.Parent = noteOverlay
+    local targetLine = Instance.new("Frame")
+    targetLine.Size = UDim2.new(1, 0, 0, 2)
+    targetLine.Position = UDim2.new(0, 0, 1, -2)
+    targetLine.BackgroundColor3 = Color3.fromRGB(190, 190, 210)
+    targetLine.BorderSizePixel = 0
+    targetLine.Parent = noteOverlay
+    local noteBlocks = {}
+    for index = 1, 24 do
+        local block = Instance.new("TextLabel")
+        block.Name = "Note" .. index
+        block.AnchorPoint = Vector2.new(0.5, 0)
+        block.Size = UDim2.new(0, 20, 0, 17)
+        block.BackgroundColor3 = Color3.fromRGB(60, 145, 240)
+        block.TextColor3 = Color3.fromRGB(255, 255, 255)
+        block.TextSize = 11
+        block.Font = Enum.Font.GothamBold
+        block.Visible = false
+        block.Parent = noteOverlay
+        noteBlocks[index] = block
+    end
 
     local sizeConstraint = Instance.new("UISizeConstraint")
     sizeConstraint.MinSize = Vector2.new(360, 70)
@@ -4002,6 +4941,21 @@ local function createOnscreenPlayerHud()
     closeBtn.AutoButtonColor = false
     closeBtn.Parent = rightSection
 
+    -- Compact A/B markers on the HUD; the full controls also offer clear.
+    for index, point in ipairs({"A", "B"}) do
+        local button = Instance.new("TextButton")
+        button.Name = "LoopPoint" .. point
+        button.Position = UDim2.new(0, (index - 1) * 23 + 2, 1, -17)
+        button.Size = UDim2.new(0, 21, 0, 16)
+        button.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+        button.TextColor3 = Color3.fromRGB(220, 220, 230)
+        button.Text = point
+        button.TextSize = 10
+        button.Font = Enum.Font.GothamBold
+        button.Parent = rightSection
+        button.MouseButton1Click:Connect(function() setPracticeLoopPoint(point) end)
+    end
+
     -- Button Hover & Click Handlers
     local barHovered = false
     trackHitArea.MouseEnter:Connect(function()
@@ -4170,6 +5124,22 @@ local function createOnscreenPlayerHud()
             return
         end
 
+        noteOverlay.Visible = PlayerHudState.visualizerEnabled and playing and PlayerHudState.visualEvents ~= nil
+        if noteOverlay.Visible then
+            local upcoming = Core.getUpcomingNotes(PlayerHudState.visualEvents, PlayerHudState.nextEventIndex, PlayerHudState.currentTime, 2, #noteBlocks)
+            local low = currentLayoutName == "compact" and compactStartNote or startNote
+            local count = currentLayoutName == "compact" and 12 or 61
+            for index, block in ipairs(noteBlocks) do
+                local item = upcoming[index]
+                local info = item and CharToKeyInfo[item.char]
+                block.Visible = info ~= nil
+                if info then
+                    block.Text = item.char
+                    block.Position = UDim2.new((info.note - low + 0.5) / count, 0, item.progress, -17 * item.progress)
+                end
+            end
+        end
+
         titleLabel.Text = PlayerHudState.title
 
         local statusPrefix = ""
@@ -4180,7 +5150,11 @@ local function createOnscreenPlayerHud()
         elseif PlayerHudState.status == "finished" then
             statusPrefix = "Finished · "
         end
-        subtitleLabel.Text = statusPrefix .. PlayerHudState.subtitle
+        if PlayerHudState.practiceMode and PlayerHudState.waitingForNotes then
+            subtitleLabel.Text = "Practice · play: " .. table.concat(PlayerHudState.waitingForNotes, " ")
+        else
+            subtitleLabel.Text = statusPrefix .. PlayerHudState.subtitle
+        end
 
         -- Next-note highlight badge.
         if PlayerHudState.highlightNext and PlayerHudState.nextNoteChars then
